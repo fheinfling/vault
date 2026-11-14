@@ -116,7 +116,10 @@ def publish(args: argparse.Namespace) -> None:
     print(f"evidence for {sha[:10]} published to {repo}#{args.pr}")
     if args.approve:
         # Your sign-off on exactly this commit. The review event re-runs the gate by itself.
-        qlib.sh("gh", "pr", "review", str(args.pr), "--repo", repo, "--comment", "--body", "/director-approve")
+        # Pinned to the commit the evidence is for: if the head moved meanwhile, the sign-off stays on
+        # that commit and does not count for the new one.
+        qlib.sh("gh", "api", "-X", "POST", f"repos/{repo}/pulls/{args.pr}/reviews", "-f", f"commit_id={sha}",
+                "-f", "event=COMMENT", "-f", "body=/director-approve")
         print(f"/director-approve submitted on {sha[:10]}; the gate re-runs on the review event")
         return
     # The workflow has no comment trigger, so re-run this head's latest quality-gate job by hand;

@@ -12,6 +12,7 @@ fixture-based eval cases).
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -561,6 +562,13 @@ class EvidenceHook(unittest.TestCase):
         self.assertEqual(self.run_hook("Edit", kit_edit), 2)                            # otherwise blocked
         self.assertEqual(self.run_hook("Write", {"file_path": "notes.md", "content": marker}, allow_policy_edits=True), 2)
 
+    def test_agents_cannot_post_statuses_or_check_runs(self):
+        for cmd in ["gh api -X POST repos/o/r/statuses/abc -f state=success -f context=x",
+                    "gh api repos/o/r/check-runs -f name=quality-gate -f conclusion=success",
+                    "curl -X POST https://api.github.com/repos/o/r/statuses/abc"]:
+            self.assertEqual(self.run_hook("Bash", {"command": cmd}), 2, cmd)
+        self.assertEqual(self.run_hook("mcp__github__create_commit_status", {"state": "success"}), 2)
+
     def test_reading_and_running_the_loop_stay_allowed(self):
         for cmd in ["cat .quality/packet.md", "code_quality/scripts/review_loop.sh --intent x > .quality/loop.out 2>&1",
                     "python3 code_quality/scripts/evidence_comment.py fetch --pr 4 --sha abc", "swift test"]:
@@ -657,7 +665,46 @@ class GateStatus(unittest.TestCase):
     def test_publish_can_sign_off_in_one_step(self):
         src = (KIT / "scripts" / "evidence_comment.py").read_text()
         self.assertIn('"--approve"', src)
-        self.assertIn('"/director-approve"', src)
+        self.assertIn('"body=/director-approve"', src)
+
+
+class GateHardening(unittest.TestCase):
+    def wf(self):
+        return (KIT / "ci" / "quality-gate.yml").read_text()
+
+    def job(self, name):
+        wf = self.wf(); start = wf.index(f"\n  {name}:")
+        nxt = re.search(r"\n  [a-z-]+:\n", wf[start + 3:])
+        return wf[start: start + 3 + nxt.start()] if nxt else wf[start:]
+
+    def test_only_the_gate_job_may_write_statuses(self):
+        wf = self.wf()
+        top = wf[wf.index("\npermissions:"):wf.index("\nconcurrency:")]
+        self.assertNotIn("statuses", top)
+        self.assertNotIn("pull-requests: write", top)
+        self.assertIn("statuses: write", self.job("quality-gate"))
+        for name in ("policy", "checks", "review"):
+            self.assertNotIn("statuses", self.job(name), name)
+
+    def test_checks_run_on_review_events_and_gate_every_event(self):
+        self.assertNotIn("if: github.event_name != 'pull_request_review'", self.job("checks"))
+        enforce = self.wf()[self.wf().index("- name: Enforce"):]
+        self.assertIn('if [ "${{ needs.checks.result }}" != "success" ]', enforce)
+        self.assertIn("the CI review job did not succeed", enforce)
+
+    def test_actions_pinned_and_no_persisted_credentials(self):
+        wf = self.wf()
+        for line in re.findall(r"(?m)^\s*(?:-\s*)?uses: (\S+)", wf):
+            self.assertRegex(line, r"@[0-9a-f]{40}$", line)
+        self.assertEqual(wf.count("actions/checkout@"), wf.count("persist-credentials: false"))
+
+    def test_signoff_is_pinned_to_the_evidenced_commit(self):
+        src = (KIT / "scripts" / "evidence_comment.py").read_text()
+        self.assertIn('f"commit_id={sha}"', src)
+        self.assertNotIn('"gh", "pr", "review"', src)
+
+    def test_loop_never_reviews_an_empty_delta(self):
+        self.assertIn('[ "$last_reviewed" != "$(git rev-parse HEAD)" ]', (KIT / "scripts" / "review_loop.sh").read_text())
 
 
 class CiPolicy(unittest.TestCase):

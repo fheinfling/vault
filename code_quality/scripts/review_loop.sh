@@ -92,7 +92,10 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
   gate_until_green || { echo "Gate still red after repairs."; exit 1; }
 
   since=""
-  if [ "$round" -ge "$DIFF_ONLY_AFTER" ] && [ -n "$last_reviewed" ]; then since="--since $last_reviewed"; fi
+  # Delta-only review needs a delta: when the repair round made no commit, review the whole change again.
+  if [ "$round" -ge "$DIFF_ONLY_AFTER" ] && [ -n "$last_reviewed" ] && [ "$last_reviewed" != "$(git rev-parse HEAD)" ]; then
+    since="--since $last_reviewed"
+  fi
   head_sha="$(git rev-parse HEAD)"
   # shellcheck disable=SC2086
   python3 "$HERE/cross_review.py" --base "$BASE" $since $DEPTH --intent "$INTENT"

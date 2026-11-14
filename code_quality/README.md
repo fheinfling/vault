@@ -96,7 +96,8 @@ Then:
 4. **GitHub settings.**
    - Ruleset on `main`: require PRs, require the `checks` check and the
      `quality-gate / approval` commit status (pending while waiting on you, failure only
-     when blocked), dismiss stale approvals on push, require the merge queue,
+     when blocked) **with its source set to GitHub Actions**, so a status posted with a
+     personal token does not count, dismiss stale approvals on push, require the merge queue,
      **require review from Code Owners**, and no bypass for bots or apps.
    - Copy `templates/CODEOWNERS` to `.github/CODEOWNERS`. On `pull_request`,
      GitHub runs the workflow *from the PR*, so without code-owner review a PR
