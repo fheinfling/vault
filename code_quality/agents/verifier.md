@@ -42,6 +42,12 @@ Special cases:
 
 Return one verdict per candidate id. Never add new findings here.
 
+The deterministic gate (build, tests, checks) already ran before review. If your
+sandbox cannot run the full gate (for example a build cache outside the
+workspace), verify each claim with targeted reads and checks instead; that
+alone does not make your verification incomplete. Say what you could not run
+in `note`.
+
 If you cannot open the code (tool or sandbox failure), set complete=false and
 say why in `note`. Never return "unresolved" for everything as a stand-in for
 "I couldn't look".

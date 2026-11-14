@@ -14,8 +14,6 @@ import sys
 import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "code_quality" / "scripts"))
-import classify_risk  # noqa: E402  (path set above)
 
 # path -> (tier, floor_hit). Every path is classified alone, as a one-line change.
 EXPECTED = {
@@ -44,6 +42,8 @@ EXPECTED = {
 
 
 def main() -> int:
+    sys.path.insert(0, str(ROOT / "code_quality" / "scripts"))
+    import classify_risk  # the kit's classifier, loaded from the vendored copy
     with open(ROOT / "quality.toml", "rb") as fh:
         cfg = tomllib.load(fh)
     bad = []
