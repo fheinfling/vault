@@ -34,7 +34,12 @@ PROT = (r"(\.github/workflows|\.github/CODEOWNERS|\.github/(PULL_REQUEST_TEMPLAT
 REDIRECT_TO_PROT = re.compile(r">>?\s*['\"]?[^\s'\"&|;]*" + PROT)
 # A mutating command whose arguments (same pipeline segment) name a protected path.
 MUTATE_TO_PROT = re.compile(r"\b(sed\s+-i|perl\s+-i|tee|mv|cp|rm|chmod|truncate|git\s+(checkout|restore|rm|mv))\b[^;&|\n]*" + PROT)
-APPROVE_RE = re.compile(r"(gh\s+pr\s+review|/director-approve|pulls/\d+/reviews|--approve\b|gh\s+pr\s+merge|/statuses/|/check-runs|/check-suites|createCommitStatus|createCheckRun)")
+# Every spelling of an approval, merge or status write: CLI, REST (the PR number may be a shell
+# variable), GraphQL mutations, and a review `event` set to APPROVE.
+APPROVE_RE = re.compile(r"(gh\s+pr\s+review|/director-approve|pulls/[^/\s]+/(reviews|merge)|--approve\b|gh\s+pr\s+merge|"
+                        r"/statuses/|/check-runs|/check-suites|createCommitStatus|createCheckRun|addPullRequestReview|"
+                        r"submitPullRequestReview|mergePullRequest|enablePullRequestAutoMerge|"
+                        r"(?i:\bevent\b['\"]?\s*[=:]\s*['\"]?approve))")
 # Review evidence (local review mode) is published by a human, never by the agent it judges:
 # no publish command, no hand-made comment carrying the evidence marker, no edits to the files
 # the loop wrote. Otherwise an agent could post "0 findings" under its human's account.
@@ -86,9 +91,19 @@ if any(MARKER_RE.search(t) for t in texts):
 
 # MCP tools (GitHub and others) act on the remote directly: no approving, merging or signing off
 # through them either. Path rules don't apply; they have no local file argument.
-MCP_APPROVE_TOOL = re.compile(r"(merge|approve|(create|submit|add|update)_?\w*review|(create|update|set)_?\w*(status|check_?run))", re.I)
+# Fail closed: tool names put the verb anywhere (`create_pull_request_review`,
+# `pull_request_review_write`) or in an argument (`method: "create"`). So a tool whose name
+# touches reviews, merges, approvals, statuses or check runs is blocked unless its name says it
+# starts with get_, list_, search_ or read_, and an input value that IS an approval or merge
+# (`event: "APPROVE"`, under any key)
+# is blocked whatever the tool.
+MCP_SENSITIVE = re.compile(r"(merge|approv|review|status|check_?(run|suite))", re.I)
+MCP_READ_ONLY = re.compile(r"^(get|list|search|read)_", re.I)
+MCP_APPROVE_VALUE = re.compile(r"\s*(approve|approved|merge)\s*", re.I)
 if tool.startswith("mcp__"):
-    if MCP_APPROVE_TOOL.search(tool) or any(APPROVE_RE.search(t) or "/director-approve" in t for t in texts):
+    name = tool.rsplit("__", 1)[-1]
+    if ((MCP_SENSITIVE.search(tool) and not MCP_READ_ONLY.search(name))
+            or any(MCP_APPROVE_VALUE.fullmatch(t) or APPROVE_RE.search(t) for t in texts)):
         block("Blocked: agents never approve, sign off on, or merge PRs, through any tool. "
               "Leave the PR for the human reviewer(s) the risk tier requires.")
     sys.exit(0)

@@ -22,7 +22,8 @@ itself allows (allow_model_t0, no floor rule hit, within the T0 size limit).
 
 Usage (in GitHub Actions, with GH_TOKEN set):
   approval_gate.py --pr 123 --base <base-sha> --config _trusted/quality.toml \
-      --risk .quality/risk.json --review .quality/review-<sha>.json
+      --risk "$EVIDENCE_DIR/risk.json" --review "$EVIDENCE_DIR/review-head.json"
+CI sets EVIDENCE_DIR to a fresh directory under RUNNER_TEMP, outside the PR checkout.
 Exit 0 = mergeable, 3 = waiting on a human (no approval yet, or the evidence is for an older
 commit), 1 = blocked (open findings, wrong review depth or policy). The job fails on both 3 and 1,
 but says "waiting for you" plainly for 3.
@@ -113,8 +114,13 @@ def main() -> None:
     repo = args.repo or qlib.sh("gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner").strip()
     pr = gh(f"repos/{repo}/pulls/{args.pr}")
     head = pr["head"]["sha"]
-    risk = json.load(open(args.risk))
-    review = json.load(open(args.review))
+    checked_out = qlib.sh("git", "rev-parse", "HEAD").strip()
+    if head != checked_out:
+        print(f"❌ Not mergeable: live PR head {head[:10]} differs from the checked-out commit "
+              f"{checked_out[:10]}; run the gate on the current head.")
+        sys.exit(1)
+    risk = json.loads(Path(args.risk).read_text())
+    review = json.loads(Path(args.review).read_text())
 
     problems: list[tuple[str, str]] = []
     if review.get("sha") != head:

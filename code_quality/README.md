@@ -153,7 +153,8 @@ reviewers should run on a developer's machine through the logged-in `claude` and
 commit, `python3 code_quality/scripts/evidence_comment.py publish --pr <n>` posts
 the packet plus the machine-readable evidence to the PR. CI then runs only the
 deterministic `checks`, and `quality-gate` takes the evidence from that comment
-(`publish --approve` also submits your sign-off, so it is one command),
+(`publish --approve` also submits your sign-off, so it is one command: an
+approval on a PR someone else opened, the director review on your own),
 accepting it only from a human in `[risk].humans` and only for the head commit.
 No comment, no merge. What you give up: the review no longer runs in a neutral
 environment, so the sign-off rests on the publisher's machine and judgment.

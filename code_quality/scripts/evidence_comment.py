@@ -4,8 +4,9 @@
   evidence_comment.py publish --pr N [--approve] [--repo owner/name]
       Posts .quality/packet.md plus the machine-readable risk.json and review-<head>.json as one
       PR comment. Run it after review_loop.sh converged, from the same checkout, with the head
-      commit already pushed. --approve also submits your `/director-approve` review on that
-      commit, so one command is the whole human step.
+      commit already pushed. --approve also submits your sign-off on that commit, so one command
+      is the whole human step: an APPROVE review when you are not the PR author (a bot-opened
+      PR), a `/director-approve` review when you are (GitHub won't let authors approve).
 
   evidence_comment.py fetch --pr N --sha <head> [--repo owner/name] [--config quality.toml] [--out .quality]
       CI: finds the newest evidence comment for that head commit, posted by a human listed in
@@ -94,6 +95,25 @@ def current_repo(explicit: str | None) -> str:
     return explicit or qlib.sh("gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner").strip()
 
 
+def sign_off(me: str, pr: dict, cfg: dict) -> tuple[str, str, str | None]:
+    """-> (review event, body, warning or None) for the human `me` signing off on `pr`.
+
+    approval_gate.py counts two kinds of sign-off: an APPROVED review by anyone in [risk].humans,
+    and, for the PR author only (GitHub won't let authors approve), a review whose body is the
+    director marker. So a non-author approves; only the author uses the marker."""
+    author = (pr.get("user") or {}).get("login", "")
+    if me.lower() != author.lower():
+        return "APPROVE", "Approved after reading the local review evidence for this commit.", None
+    labels = {l["name"] for l in pr.get("labels", [])}
+    humans = {h.lower() for h in cfg["risk"].get("humans", [])}
+    missing = [why for ok, why in [
+        (cfg["risk"].get("director_counts_as_reviewer"), "[risk].director_counts_as_reviewer is off"),
+        ("agent-authored" in labels, "the PR lacks the agent-authored label"),
+        (me.lower() in humans, f"{me} is not in [risk].humans")] if not ok]
+    note = ("your director sign-off will not count: " + "; ".join(missing)) if missing else None
+    return "COMMENT", "/director-approve", note
+
+
 def publish(args: argparse.Namespace) -> None:
     st = qlib.state_dir()
     sha = qlib.sh("git", "rev-parse", "HEAD").strip()
@@ -106,7 +126,8 @@ def publish(args: argparse.Namespace) -> None:
     if review.get("sha") != sha or risk.get("sha") != sha:
         sys.exit(f"evidence_comment: the evidence is for another commit than HEAD {sha[:10]}; re-run the loop")
     repo = current_repo(args.repo)
-    head = gh(f"repos/{repo}/pulls/{args.pr}")["head"]["sha"]
+    pr = gh(f"repos/{repo}/pulls/{args.pr}")
+    head = pr["head"]["sha"]
     if head != sha:
         sys.exit(f"evidence_comment: PR head is {head[:10]} but local HEAD is {sha[:10]}; push first")
     body = render(paths["packet"].read_text(), risk, review)
@@ -118,9 +139,13 @@ def publish(args: argparse.Namespace) -> None:
         # Your sign-off on exactly this commit. The review event re-runs the gate by itself.
         # Pinned to the commit the evidence is for: if the head moved meanwhile, the sign-off stays on
         # that commit and does not count for the new one.
+        me = qlib.sh("gh", "api", "user", "-q", ".login").strip()
+        event, text, note = sign_off(me, pr, qlib.load_config())
+        if note:
+            print(f"warning: {note}", file=sys.stderr)
         qlib.sh("gh", "api", "-X", "POST", f"repos/{repo}/pulls/{args.pr}/reviews", "-f", f"commit_id={sha}",
-                "-f", "event=COMMENT", "-f", "body=/director-approve")
-        print(f"/director-approve submitted on {sha[:10]}; the gate re-runs on the review event")
+                "-f", f"event={event}", "-f", f"body={text}")
+        print(f"{event} review submitted on {sha[:10]}; the gate re-runs on the review event")
         return
     # The workflow has no comment trigger, so re-run the quality-gate job of this commit's newest run
     # (whatever its event); it then reads the new comment.
@@ -160,7 +185,7 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("publish")
     p.add_argument("--pr", required=True)
-    p.add_argument("--approve", action="store_true", help="also submit your /director-approve review on the head commit")
+    p.add_argument("--approve", action="store_true", help="also sign off on the head commit: APPROVE, or /director-approve if you authored the PR")
     p.add_argument("--repo")
     f = sub.add_parser("fetch")
     f.add_argument("--pr", required=True)
