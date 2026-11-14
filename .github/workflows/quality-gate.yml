@@ -33,8 +33,9 @@ on:
     types: [submitted, dismissed]
   merge_group:
 
-# Least privilege. Jobs that run PR-controlled code (checks) get read-only access; only the
-# quality-gate job, which runs nothing but the base branch's scripts, may write the required status.
+# Least privilege. No job writes a commit status: the quality-gate job's own result is the verdict.
+# Only the review job (ci mode) has pull-requests: write, to post the evidence packet and the risk
+# label; every other job is read-only.
 permissions:
   contents: read
 
