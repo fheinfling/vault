@@ -55,7 +55,7 @@ struct VaultCLI {
                 exit(1)
             }
         case "accounts":
-            let ledger = try Ledger(path: databasePath)
+            let ledger = try Ledger(path: databasePath, cipher: AppleFieldCipher(secrets: KeychainSecretStore()))
             let accounts = try await ledger.accounts(includeHidden: arguments.contains("--all"))
             if accounts.isEmpty {
                 print("no accounts yet. run `vault sync` once a connector is configured.")
@@ -73,12 +73,12 @@ struct VaultCLI {
             )
         case "balances":
             let id = try requiredInt64(arguments, "--account")
-            let ledger = try Ledger(path: databasePath)
+            let ledger = try Ledger(path: databasePath, cipher: AppleFieldCipher(secrets: KeychainSecretStore()))
             let history = try await ledger.balanceHistory(accountID: id)
             printTable(["AT", "AMOUNT", "CCY"], history.map { [$0.at.formatted(.iso8601), "\($0.amount)", $0.currency] })
         case "holdings":
             let id = try requiredInt64(arguments, "--account")
-            let ledger = try Ledger(path: databasePath)
+            let ledger = try Ledger(path: databasePath, cipher: AppleFieldCipher(secrets: KeychainSecretStore()))
             let holdings = try await ledger.latestHoldings(accountID: id)
             printTable(
                 ["ISIN", "NAME", "QTY", "PRICE", "VALUE", "CCY"],
@@ -89,7 +89,7 @@ struct VaultCLI {
             )
         case "sync":
             try checkEgress()
-            let ledger = try Ledger(path: databasePath)
+            let ledger = try Ledger(path: databasePath, cipher: AppleFieldCipher(secrets: KeychainSecretStore()))
             let engine = SyncEngine(ledger: ledger, notifier: OSAScriptNotifier())
             var connectors = configuredConnectors()
             if !arguments.isEmpty {
@@ -104,7 +104,7 @@ struct VaultCLI {
                 print("\(result.connectionID): \(status), \(result.accounts) accounts, \(result.rows) rows\(result.message.map { ", \($0)" } ?? "")")
             }
         case "runs":
-            let ledger = try Ledger(path: databasePath)
+            let ledger = try Ledger(path: databasePath, cipher: AppleFieldCipher(secrets: KeychainSecretStore()))
             let runs = try await ledger.recentSyncRuns()
             printTable(
                 ["STARTED", "CONNECTION", "OK", "ACCOUNTS", "ROWS", "ERROR"],

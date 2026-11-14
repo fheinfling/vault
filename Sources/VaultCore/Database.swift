@@ -45,6 +45,7 @@ final class Database {
             chmod(path, 0o600)
         }
         try execute("PRAGMA journal_mode=WAL")
+        try execute("PRAGMA secure_delete=ON")
         try execute("PRAGMA foreign_keys=ON")
         try execute("PRAGMA busy_timeout=5000")
     }

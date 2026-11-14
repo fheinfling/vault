@@ -69,7 +69,7 @@ private let accountA = AccountRecord(externalID: "a", provider: "fake", kind: .c
 private let accountB = AccountRecord(externalID: "b", provider: "fake", kind: .crypto, name: "Second", currency: "EUR")
 
 @Test func successfulSyncStoresEverythingAndSetsCursors() async throws {
-    let ledger = try Ledger(path: ":memory:")
+    let ledger = try Ledger(path: ":memory:", cipher: TestFieldCipher())
     let engine = SyncEngine(ledger: ledger)
     let result = await engine.sync(FakeConnector(script: Script(accounts: [accountA])))
     #expect(result.ok)
@@ -83,7 +83,7 @@ private let accountB = AccountRecord(externalID: "b", provider: "fake", kind: .c
 }
 
 @Test func secondSyncIsIncrementalWithOverlap() async throws {
-    let ledger = try Ledger(path: ":memory:")
+    let ledger = try Ledger(path: ":memory:", cipher: TestFieldCipher())
     let engine = SyncEngine(ledger: ledger)
     let script = Script(accounts: [accountA])
     _ = await engine.sync(FakeConnector(script: script))
@@ -93,7 +93,7 @@ private let accountB = AccountRecord(externalID: "b", provider: "fake", kind: .c
 }
 
 @Test func failedRunDoesNotAdvanceAnyCursor() async throws {
-    let ledger = try Ledger(path: ":memory:")
+    let ledger = try Ledger(path: ":memory:", cipher: TestFieldCipher())
     let engine = SyncEngine(ledger: ledger)
     let script = Script(accounts: [accountA], activityFailures: 1)
     let first = await engine.sync(FakeConnector(script: script))
@@ -109,7 +109,7 @@ private let accountB = AccountRecord(externalID: "b", provider: "fake", kind: .c
 }
 
 @Test func newAccountTriggersFullHistory() async throws {
-    let ledger = try Ledger(path: ":memory:")
+    let ledger = try Ledger(path: ":memory:", cipher: TestFieldCipher())
     let engine = SyncEngine(ledger: ledger)
     let script = Script(accounts: [accountA])
     _ = await engine.sync(FakeConnector(script: script))
@@ -121,7 +121,7 @@ private let accountB = AccountRecord(externalID: "b", provider: "fake", kind: .c
 }
 
 @Test func newAccountStillGetsFullHistoryWhenItsFirstRunFails() async throws {
-    let ledger = try Ledger(path: ":memory:")
+    let ledger = try Ledger(path: ":memory:", cipher: TestFieldCipher())
     let engine = SyncEngine(ledger: ledger)
     let script = Script(accounts: [accountA])
     #expect(await engine.sync(FakeConnector(script: script)).ok)
@@ -137,7 +137,7 @@ private let accountB = AccountRecord(externalID: "b", provider: "fake", kind: .c
 }
 
 @Test func needsUserActionIsFlaggedAndNotified() async throws {
-    let ledger = try Ledger(path: ":memory:")
+    let ledger = try Ledger(path: ":memory:", cipher: TestFieldCipher())
     let notifier = RecordingNotifier()
     let engine = SyncEngine(ledger: ledger, notifier: notifier)
     let result = await engine.sync(

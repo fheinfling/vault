@@ -112,16 +112,33 @@ enum Schema {
             PRIMARY KEY (connection_id, stream)
         );
         """,
+        // v3: sealed originals accompany blind indexes. Cleanup is retried after an interrupted open.
+        """
+        ALTER TABLE account ADD COLUMN external_id_sealed TEXT;
+        ALTER TABLE "transaction" ADD COLUMN external_id_sealed TEXT;
+        ALTER TABLE activity ADD COLUMN external_id_sealed TEXT;
+        CREATE TABLE field_encryption_cleanup (pending INTEGER NOT NULL);
+        INSERT INTO field_encryption_cleanup VALUES (1);
+        """,
     ]
 
-    static func migrate(_ db: Database) throws {
+    static func migrate(_ db: Database, fields: FieldStorage) throws {
         let current = try db.query("PRAGMA user_version").first?["user_version"]?.int64 ?? 0
-        guard current < migrations.count else { return }
         for (index, sql) in migrations.enumerated() where index >= Int(current) {
             try db.transaction {
                 try db.execute(sql)
+                if index == 2 { try fields.migrate(db) }
                 try db.execute("PRAGMA user_version = \(index + 1)")
             }
+        }
+        if try !db.query("SELECT * FROM field_encryption_cleanup").isEmpty {
+            // Overwriting rows alone leaves plaintext in free pages and old WAL frames.
+            try db.execute("VACUUM")
+            let checkpoint = try db.query("PRAGMA wal_checkpoint(TRUNCATE)").first
+            guard checkpoint?["busy"]?.int64 == 0 else {
+                throw DatabaseError(code: 5, message: "encryption cleanup requires other database readers to close")
+            }
+            try db.run("DELETE FROM field_encryption_cleanup")
         }
     }
 }

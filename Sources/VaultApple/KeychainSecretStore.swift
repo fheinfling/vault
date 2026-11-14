@@ -46,6 +46,19 @@ public struct KeychainSecretStore: SecretStore {
         }
     }
 
+    public func getOrCreate(_ key: String, create: () throws -> Data) throws -> Data {
+        if let existing = try get(key) { return existing }
+        let value = try create()
+        var insert = baseQuery(key)
+        insert[kSecValueData] = value
+        insert[kSecAttrAccessible] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        let status = SecItemAdd(insert as CFDictionary, nil)
+        if status == errSecSuccess { return value }
+        // Another CLI process may have created the shared field key since our read.
+        if status == errSecDuplicateItem, let existing = try get(key) { return existing }
+        throw KeychainError(status: status, operation: "create \(key)")
+    }
+
     public func remove(_ key: String) throws {
         let status = SecItemDelete(baseQuery(key) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {

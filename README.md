@@ -49,4 +49,31 @@ sudo install -m 2755 -o root -g vault .build/release/vault /usr/local/bin/vault
 
 `VAULT_REQUIRE_EGRESS=1` makes `vault sync` refuse to run unconfined. Once the allowlist is installed, run `/usr/local/bin/vault schedule --require-egress` to put it in the launch agent's environment. Re-scheduling later keeps it, along with any other `EnvironmentVariables` already in the plist.
 
-Data lives in `~/Library/Application Support/vault/vault.db` (mode 0600).
+Data lives in `~/Library/Application Support/vault/vault.db` (mode 0600). Account names,
+providers and masked IBANs; balances; holding names, ISINs, quantities, prices and values;
+transaction amounts, counterparties, purposes, categories and raw provider JSON; and activity
+ISINs, quantities, prices, fees, taxes, amounts and raw provider JSON are encrypted per field
+with AES-256-GCM. Account, transaction and activity external IDs have sealed originals and
+keyed blind indexes for idempotent lookups. Stored fields use `v1:` plus base64 and authenticate
+the table and column name. Money remains Decimal text inside the encrypted envelope.
+
+The 32-byte master key is created once through `SecretStore` in the login Keychain, under
+service `com.franzheinfling.vault`, key `vault.field-key.v1`. Encryption and blind indexes use
+separate HKDF-derived subkeys. The key is device-only and available while unlocked; it is
+not stored in the database or its backups. Losing the Keychain item makes encrypted data
+unreadable. Processes that can obtain this key can decrypt the data.
+
+Residual plaintext metadata includes row IDs and relationships, connection IDs/kinds/status
+and action messages, account kinds/currencies/flags, all dates (ISO 8601 UTC), activity types,
+booked flags, sync runs (including counts and errors), and sync cursors. Blind indexes reveal
+equality within a table; row counts, relationships and ciphertext lengths are also visible.
+Connection identifiers, action messages and sync errors must not contain credentials or
+financial details.
+
+Opening an older database automatically migrates v1/v2 rows to v3 in a transaction, then
+vacuums SQLite and truncates its WAL to remove old plaintext from the live files. Interrupted
+cleanup is retried on the next open; other database readers must close for cleanup to finish.
+Older copies, backups and filesystem snapshots are not scrubbed. Do not run an older binary
+against a migrated database. To roll back to a pre-encryption binary, stop vault and restore a
+matching pre-v3 backup (which contains plaintext); reverting code alone cannot decrypt v3.
+Keep the Keychain item for any encrypted databases you retain.

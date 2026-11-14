@@ -50,6 +50,8 @@ public protocol SecretStore: Sendable {
     func get(_ key: String) throws -> Data?
     func set(_ key: String, _ value: Data) throws
     func remove(_ key: String) throws
+    /// Atomically creates a missing secret without replacing a concurrent creator's value.
+    func getOrCreate(_ key: String, create: () throws -> Data) throws -> Data
 }
 
 public extension SecretStore {
