@@ -47,14 +47,10 @@ struct FieldStorage {
                 var assignments: [String] = []
                 var values: [SQLValue] = []
                 for name in names {
+                    // Every pre-v3 value is plaintext, even one that happens to start with "v1:".
                     guard let value = row[name]?.string else { continue }
-                    let context = "\(table).\(name)"
-                    if value.hasPrefix("v1:") {
-                        _ = try open(row[name], context)
-                    } else {
-                        assignments.append("\(name) = ?")
-                        values.append(try seal(value, context))
-                    }
+                    assignments.append("\(name) = ?")
+                    values.append(try seal(value, "\(table).\(name)"))
                 }
                 if let externalID = row["external_id"]?.string {
                     assignments += ["external_id = ?", "external_id_sealed = ?"]

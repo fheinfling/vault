@@ -7,7 +7,9 @@ import VaultCore
 /// Items created by a signed binary carry an access list naming that binary, so another program
 /// asking for the item triggers a Keychain prompt. Once the vault ships as a signed app with
 /// entitlements, switch to the data-protection keychain (`kSecUseDataProtectionKeychain`),
-/// which binds items to the team identifier instead.
+/// which binds items to the team identifier instead. Until then `kSecAttrAccessible` below has no
+/// effect: the file-based keychain ignores it, so items are not device-bound. An unsigned binary
+/// asking for the data-protection keychain gets `errSecMissingEntitlement` (-34018).
 public struct KeychainSecretStore: SecretStore {
     public let service: String
 

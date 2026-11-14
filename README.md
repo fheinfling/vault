@@ -59,8 +59,13 @@ the table and column name. Money remains Decimal text inside the encrypted envel
 
 The 32-byte master key is created once through `SecretStore` in the login Keychain, under
 service `com.franzheinfling.vault`, key `vault.field-key.v1`. Encryption and blind indexes use
-separate HKDF-derived subkeys. The key is device-only and available while unlocked; it is
-not stored in the database or its backups. Losing the Keychain item makes encrypted data
+separate HKDF-derived subkeys. The key is not stored in the database or its backups. The
+command-line build cannot use the data-protection Keychain (it needs a signed app with
+entitlements; an ad-hoc-signed binary gets `errSecMissingEntitlement`), so the item lives in
+the file-based login keychain: its access list names the vault binary, but it is **not**
+device-bound. A copy of the login keychain file plus its password exposes the key. The
+`ThisDeviceOnly` accessibility class takes effect once the app shell moves the item to the
+data-protection Keychain. Losing the Keychain item makes encrypted data
 unreadable. Processes that can obtain this key can decrypt the data.
 
 Residual plaintext metadata includes row IDs and relationships, connection IDs/kinds/status
@@ -74,6 +79,6 @@ Opening an older database automatically migrates v1/v2 rows to v3 in a transacti
 vacuums SQLite and truncates its WAL to remove old plaintext from the live files. Interrupted
 cleanup is retried on the next open; other database readers must close for cleanup to finish.
 Older copies, backups and filesystem snapshots are not scrubbed. Do not run an older binary
-against a migrated database. To roll back to a pre-encryption binary, stop vault and restore a
+against a migrated database; its writes abort with `database requires vault >= v3`. To roll back to a pre-encryption binary, stop vault and restore a
 matching pre-v3 backup (which contains plaintext); reverting code alone cannot decrypt v3.
 Keep the Keychain item for any encrypted databases you retain.

@@ -217,3 +217,55 @@ private struct FailingMigrationCipher: FieldCipher {
     try await ledger.recordHoldings(connectionID: "test", runID: run, at: Fixture.at, holdings)
     #expect(try await ledger.latestHoldings(accountID: ids["p"]!).map(\.name) == ["A", "Z"])
 }
+
+@Test func legacyPlaintextWithEnvelopePrefixIsSealedDuringMigration() throws {
+    let fixture = Fixture()
+    defer { fixture.remove() }
+    try fixture.writeV2()
+    let purpose = "v1: invoice correction"
+    do {
+        let db = try Database(path: fixture.path)
+        try db.run("UPDATE \"transaction\" SET purpose = ?", [.text(purpose)])
+    }
+    _ = try Ledger(path: fixture.path, cipher: TestFieldCipher())
+    let db = try Database(path: fixture.path)
+    let row = try #require(db.query("SELECT purpose FROM \"transaction\"").first)
+    #expect(try FieldStorage(cipher: TestFieldCipher()).open(row["purpose"], "transaction.purpose") == purpose)
+}
+
+/// Statements a pre-v3 binary (base commit 982b1b8) issues, with plaintext external IDs and values.
+@Test func preV3WritersAbortOnMigratedDatabase() async throws {
+    let fixture = Fixture()
+    defer { fixture.remove() }
+    try await fixture.write()
+    _ = try Ledger(path: fixture.path, cipher: TestFieldCipher())
+    let db = try Database(path: fixture.path)
+    let legacyWrites: [(String, [SQLValue])] = [
+        ("""
+         INSERT INTO account (connection_id, external_id, provider, kind, name, iban_masked, currency, is_portfolio, hidden)
+         VALUES ('test', 'DE00TEST', 'PrivateBank', 'depot', 'Giro', NULL, 'EUR', 1, 0)
+         ON CONFLICT(connection_id, external_id) DO UPDATE SET name = excluded.name
+         """, []),
+        ("INSERT INTO balance_snapshot (account_id, run_id, at, amount, currency) VALUES (1, NULL, ?, '1.00', 'EUR')",
+         [.text(Ledger.iso(Fixture.at))]),
+        ("""
+         INSERT INTO holding_snapshot (account_id, run_id, at, isin, name, quantity, price, value, currency)
+         VALUES (1, NULL, ?, NULL, 'Fund', '1', NULL, NULL, 'EUR')
+         """, [.text(Ledger.iso(Fixture.at))]),
+        ("""
+         INSERT INTO "transaction" (account_id, external_id, booked_at, amount, currency) VALUES (1, 'DE00TX', ?, '1.00', 'EUR')
+         ON CONFLICT(account_id, external_id) DO UPDATE SET amount = excluded.amount
+         """, [.text(Ledger.iso(Fixture.at))]),
+        ("""
+         INSERT INTO activity (account_id, external_id, at, type, amount, currency) VALUES (1, 'DE00ACT', ?, 'buy', '1.00', 'EUR')
+         ON CONFLICT(account_id, external_id) DO UPDATE SET amount = excluded.amount
+         """, [.text(Ledger.iso(Fixture.at))]),
+    ]
+    for (sql, values) in legacyWrites {
+        #expect(throws: DatabaseError.self, "pre-v3 write must abort: \(sql)") { try db.run(sql, values) }
+    }
+    for table in ["account", "balance_snapshot", "holding_snapshot", "transaction", "activity"] {
+        #expect(try db.query("SELECT COUNT(*) AS n FROM \"\(table)\"").first?["n"]?.int64 == 1, "\(table) gained a row")
+    }
+    try fixture.checkStoredValues()
+}

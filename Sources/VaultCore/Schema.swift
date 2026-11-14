@@ -119,6 +119,23 @@ enum Schema {
         ALTER TABLE activity ADD COLUMN external_id_sealed TEXT;
         CREATE TABLE field_encryption_cleanup (pending INTEGER NOT NULL);
         INSERT INTO field_encryption_cleanup VALUES (1);
+        -- A pre-v3 binary accepts this user_version and would insert plaintext rows whose external IDs
+        -- never match the blind indexes, duplicating the ledger. Its writes must abort instead.
+        CREATE TRIGGER account_requires_v3 BEFORE INSERT ON account
+        WHEN NEW.external_id_sealed IS NULL OR NEW.name NOT GLOB 'v1:*'
+        BEGIN SELECT RAISE(ABORT, 'database requires vault >= v3'); END;
+        CREATE TRIGGER balance_snapshot_requires_v3 BEFORE INSERT ON balance_snapshot
+        WHEN NEW.amount NOT GLOB 'v1:*'
+        BEGIN SELECT RAISE(ABORT, 'database requires vault >= v3'); END;
+        CREATE TRIGGER holding_snapshot_requires_v3 BEFORE INSERT ON holding_snapshot
+        WHEN NEW.quantity NOT GLOB 'v1:*'
+        BEGIN SELECT RAISE(ABORT, 'database requires vault >= v3'); END;
+        CREATE TRIGGER transaction_requires_v3 BEFORE INSERT ON "transaction"
+        WHEN NEW.external_id_sealed IS NULL OR NEW.amount NOT GLOB 'v1:*'
+        BEGIN SELECT RAISE(ABORT, 'database requires vault >= v3'); END;
+        CREATE TRIGGER activity_requires_v3 BEFORE INSERT ON activity
+        WHEN NEW.external_id_sealed IS NULL OR NEW.amount NOT GLOB 'v1:*'
+        BEGIN SELECT RAISE(ABORT, 'database requires vault >= v3'); END;
         """,
     ]
 
