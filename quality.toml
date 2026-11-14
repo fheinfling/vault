@@ -3,8 +3,9 @@
 #   - [risk].approvals.t2 = 1. There is one person. Tier 2 compensates with deep review (both model
 #     families hunt and verify) and execution verification; the sign-off is a forced read of the
 #     evidence packet plus an audit trail, not an independent check.
-#   - [risk].allow_model_t0 = false. The model may not lower anything to Tier 0 (see the note there).
-#   - One vault floor puts all product code, the manifest, the scripts and the ignore rules at Tier 2.
+#   - [risk].allow_model_t0 = true, as in the solo profile; the vault floors keep every path except
+#     docs/ and tests out of its reach (see the note there).
+#   - Vault floors put every path except docs/ (Markdown and text) and tests at Tier 2, and the license too.
 #   - [checks] are the repo's real build, test and dependency-check commands.
 # Nothing keeps this file in sync with the kit's profiles; kit updates never touch it.
 # Changes to this file are Tier 2 and are reviewed under the policy on the base
@@ -36,6 +37,7 @@ full = [
   "swift build",
   "swift test",
   "./scripts/check-no-dependencies.sh",
+  "python3 scripts/check-risk-floors.py",
 ]
 
 [review]
@@ -92,10 +94,12 @@ humans = ["fheinfling"]
 # size limit; such merges are marked in risk.json and the packet for the weekly
 # sample. Team default: off until shadow mode shows the classifier's T0 calls match
 # yours (FLOW.md "Earning autonomy"). The solo profile (profiles/solo.toml) turns it on.
-# vault: off. Every product path is Tier 2 by floor, and there are no feature flags yet, so the
-# flag-gated Tier 0 path cannot apply.
-# Turn on only after shadow mode shows the classifier's T0 calls match yours (FLOW.md "Earning autonomy").
-allow_model_t0 = false
+# vault: on, as in the solo profile. The classifier may lower a change to Tier 0 when no floor matches,
+# it judges it docs, internal-only tooling, or additive code behind a default-off flag
+# (agents/risk-classifier.md), and it stays within the T0 size cap; such merges are marked for the
+# weekly sample. Here the vault floors leave only docs/**/*.md, docs/**/*.txt and Tests/** without a
+# floor, so the classifier can lower only those; everything else stays Tier 2.
+allow_model_t0 = true
 
 # T0 (no human): EVERY changed file must match one of these globs, the diff
 # must be under the line limit, and no floor below may apply.
@@ -141,9 +145,19 @@ tier   = 1
 reason = "dependency changes (supply chain)"
 paths  = ["**/package.json", "**/requirements*.txt", "**/pyproject.toml", "**/go.mod", "**/Cargo.toml", "**/Gemfile"]
 
-# vault-specific floor. This repo holds bank credentials and talks to banks, so every
-# Swift target, the manifest and every script is Tier 2. Only docs and tests stay below.
+# vault-specific floors. This repo will hold bank credentials, so EVERY path is Tier 2 except docs and
+# tests: a path nobody listed yet (a new tools/ folder, a new config file) can never be lowered.
+# "Docs" means Markdown and text under docs/ only, never every .md/.txt: README.md and
+# scripts/egress/README.md hold the root-run setgid and pf setup, Sources/** may get DocC catalogs or
+# text resources, and scripts may read .txt data. Operational procedures stay next to their scripts,
+# not in docs/. scripts/check-risk-floors.py pins these tiers.
+[[risk.floor]]
+tier    = 2
+reason  = "vault: everything except docs/ and tests (product code, manifest, scripts and their docs, README, CI, ignore and attribute files, any new path)"
+paths   = ["**"]
+exclude = ["docs/**/*.md", "docs/**/*.txt", "Tests/**"]
+
 [[risk.floor]]
 tier   = 2
-reason = "vault: all product code (Keychain, signing, bank protocols, connectors, ledger, CLI), the zero-dependency manifest, the egress and check scripts, and the ignore rules that keep the database and keys out of git"
-paths  = ["Sources/**", "Package.swift", "scripts/**", ".gitignore", "**/.gitignore", ".gitattributes"]
+reason = "vault: the license"
+paths  = ["LICENSE*", "**/LICENSE*", "NOTICE*"]
