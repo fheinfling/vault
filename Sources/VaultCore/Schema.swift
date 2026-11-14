@@ -115,6 +115,8 @@ enum Schema {
         // v3: sealed originals accompany blind indexes. Cleanup is retried after an interrupted open.
         // A pre-v3 binary accepts any user_version and would insert plaintext rows whose external IDs
         // never match the blind indexes, duplicating the ledger. The INSERT triggers abort its writes.
+        // `writerFence` aborts every other write of a pre-v3 connection too, including one already
+        // mid-sync when the conversion commits: its holding sets, cursors, runs and connection updates.
         """
         ALTER TABLE account ADD COLUMN external_id_sealed TEXT;
         ALTER TABLE "transaction" ADD COLUMN external_id_sealed TEXT;
@@ -136,8 +138,26 @@ enum Schema {
         CREATE TRIGGER activity_requires_v3 BEFORE INSERT ON activity
         WHEN NEW.external_id_sealed IS NULL OR NEW.amount NOT GLOB 'v1:*'
         BEGIN SELECT RAISE(ABORT, 'database requires vault >= v3'); END;
-        """,
+        """ + writerFence,
     ]
+
+    /// Every table a pre-v3 binary writes. Its connections never register `Database.writerCapability`, so
+    /// any INSERT, UPDATE or DELETE on these tables fails to prepare with "no such function".
+    static let fencedTables = [
+        "connection", "account", "balance_snapshot", "holding_set", "holding_snapshot", "transaction", "activity",
+        "sync_run", "sync_cursor",
+    ]
+
+    private static let writerFence = fencedTables.flatMap { table in
+        ["INSERT", "UPDATE", "DELETE"].map { operation in
+            """
+
+            CREATE TRIGGER \(table)_\(operation.lowercased())_requires_v3_writer BEFORE \(operation) ON "\(table)"
+            WHEN \(Database.writerCapability)() IS NOT 1
+            BEGIN SELECT RAISE(ABORT, 'database requires vault >= v3'); END;
+            """
+        }
+    }.joined()
 
     /// The schema version written by the last migration that left sensitive fields in plaintext.
     static let lastPlaintextVersion: Int64 = 2

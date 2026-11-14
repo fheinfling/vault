@@ -39,6 +39,7 @@ targets += [
         ]
     ),
     .testTarget(name: "VaultAppleTests", dependencies: ["VaultApple"]),
+    .testTarget(name: "vaultTests", dependencies: ["vault"]),
 ]
 products += [.executable(name: "vault", targets: ["vault"])]
 #endif

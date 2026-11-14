@@ -32,7 +32,7 @@ public actor Ledger {
                 )
             }
         }
-        db = try Database(path: path)
+        db = try Database(path: path, writer: true)
         fields = FieldStorage(cipher: cipher)
         convertedLegacyVersion = try Schema.migrate(db, fields: fields, legacy: legacy)
     }

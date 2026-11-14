@@ -31,7 +31,13 @@ private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self
 final class Database {
     private var handle: OpaquePointer?
 
-    init(path: String) throws {
+    /// The SQL function the v3 writer triggers call. Connections that don't register it, which includes every
+    /// pre-v3 binary, can still read but fail to prepare any write to a ledger table.
+    static let writerCapability = "vault_v3_writer"
+
+    /// - Parameter writer: register `writerCapability`, so this connection may write a v3 database. Only
+    ///   `Ledger`, which seals every sensitive field, passes true.
+    init(path: String, writer: Bool = false) throws {
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
         var h: OpaquePointer?
         let rc = sqlite3_open_v2(path, &h, flags, nil)
@@ -41,6 +47,18 @@ final class Database {
             throw DatabaseError(code: rc, message: message)
         }
         handle = opened
+        if writer {
+            let flags = SQLITE_UTF8 | SQLITE_DETERMINISTIC | SQLITE_INNOCUOUS
+            let rc = sqlite3_create_function_v2(
+                opened, Self.writerCapability, 0, flags, nil, { context, _, _ in sqlite3_result_int(context, 1) },
+                nil, nil, nil
+            )
+            guard rc == SQLITE_OK else {
+                sqlite3_close_v2(opened)
+                handle = nil
+                throw DatabaseError(code: rc, message: "cannot register \(Self.writerCapability)")
+            }
+        }
         if path != ":memory:" {
             chmod(path, 0o600)
         }

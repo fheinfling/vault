@@ -71,7 +71,9 @@ private struct Fixture {
         let db = try Database(path: path)
         #expect(try db.query("PRAGMA user_version").first?["user_version"]?.int64 == 3)
         let triggers = try db.query("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name").compactMap { $0["name"]?.string }
-        #expect(triggers == ["account", "activity", "balance_snapshot", "holding_snapshot", "transaction"].map { "\($0)_requires_v3" })
+        let content = ["account", "activity", "balance_snapshot", "holding_snapshot", "transaction"].map { "\($0)_requires_v3" }
+        let fence = Schema.fencedTables.flatMap { table in ["delete", "insert", "update"].map { "\(table)_\($0)_requires_v3_writer" } }
+        #expect(triggers == (content + fence).sorted())
     }
 
     func checkStoredValues() throws {
@@ -158,7 +160,8 @@ private struct Fixture {
     defer { fixture.remove() }
     try await fixture.write()
     let ledger = try Ledger(path: fixture.path, cipher: TestFieldCipher())
-    let db = try Database(path: fixture.path)
+    // Tampering with direct SQL access, not a pre-v3 binary, so it holds the writer capability.
+    let db = try Database(path: fixture.path, writer: true)
     try db.run("UPDATE account SET name = provider")
     await #expect(throws: TestFieldCipher.Failure.self) { try await ledger.accounts() }
     try db.run("UPDATE account SET name = 'plaintext replacement'")
@@ -268,18 +271,38 @@ private func expectPreV3WritesAbort(_ db: Database) throws {
          INSERT INTO activity (account_id, external_id, at, type, amount, currency) VALUES (1, 'DE00ACT', ?, 'buy', '1.00', 'EUR')
          ON CONFLICT(account_id, external_id) DO UPDATE SET amount = excluded.amount
          """, [.text(Ledger.iso(Fixture.at))]),
+        ("INSERT INTO connection (id, kind) VALUES ('test', 'exchange') ON CONFLICT(id) DO UPDATE SET kind = excluded.kind", []),
+        ("UPDATE connection SET needs_user_action = 'approve' WHERE id = 'test'", []),
+        ("UPDATE connection SET last_sync = ?, needs_user_action = NULL WHERE id = 'test'", [.text(Ledger.iso(Fixture.at))]),
+        ("UPDATE account SET parent_id = 1 WHERE id = 1", []),
+        ("DELETE FROM sync_cursor WHERE connection_id = 'test'", []),
+        ("""
+         INSERT INTO holding_set (account_id, run_id, at) VALUES (1, 1, ?)
+         ON CONFLICT(account_id, run_id) DO UPDATE SET at = excluded.at
+         """, [.text(Ledger.iso(Fixture.at))]),
+        ("""
+         INSERT INTO sync_cursor (connection_id, stream, value) VALUES ('test', 'transactions', '2030-01-01')
+         ON CONFLICT(connection_id, stream) DO UPDATE SET value = excluded.value
+         """, []),
+        ("INSERT INTO sync_run (connection_id, started) VALUES ('test', ?)", [.text(Ledger.iso(Fixture.at))]),
+        ("UPDATE sync_run SET finished = ?, ok = 1, accounts = 1, rows = 0, error = NULL WHERE id = 1", [.text(Ledger.iso(Fixture.at))]),
     ]
+    let before = try fencedTableContents(db)
     for (sql, values) in legacyWrites {
         do {
             try db.run(sql, values)
             Issue.record("pre-v3 write must abort: \(sql)")
         } catch let error as DatabaseError {
-            #expect(error.message == "database requires vault >= v3")
+            #expect(error.message == "no such function: \(Database.writerCapability)", "\(sql)")
         }
     }
-    for table in ["account", "balance_snapshot", "holding_snapshot", "transaction", "activity"] {
-        #expect(try db.query("SELECT COUNT(*) AS n FROM \"\(table)\"").first?["n"]?.int64 == 1, "\(table) gained a row")
-    }
+    #expect(try fencedTableContents(db) == before, "a pre-v3 write changed the ledger")
+}
+
+private func fencedTableContents(_ db: Database) throws -> [String: [[String: SQLValue]]] {
+    var contents: [String: [[String: SQLValue]]] = [:]
+    for table in Schema.fencedTables { contents[table] = try db.query("SELECT * FROM \"\(table)\" ORDER BY rowid") }
+    return contents
 }
 
 @Test(arguments: [false, true]) func preV3WritersAbortOnV3Database(convertLegacy: Bool) async throws {
@@ -294,6 +317,29 @@ private func expectPreV3WritesAbort(_ db: Database) throws {
     try fixture.checkV3Schema()
     try expectPreV3WritesAbort(try Database(path: fixture.path))
     try fixture.checkStoredValues()
+}
+
+/// A pre-v3 sync that has already written to a v2 database, then resumes after another process converted it,
+/// must not store anything: not holding sets (which would hide the depot's holdings), not cursors (which would
+/// skip history past the next run's overlap window), and not a successful run.
+@Test func inFlightPreV3SyncCannotWriteAfterConversion() async throws {
+    let fixture = Fixture()
+    defer { fixture.remove() }
+    try fixture.writeV2()
+    let legacy = try Database(path: fixture.path)
+    try legacy.run("INSERT INTO sync_run (connection_id, started) VALUES ('test', ?)", [.text(Ledger.iso(Fixture.at))])
+    _ = try Ledger(path: fixture.path, cipher: TestFieldCipher(), legacy: .convert(backupPath: nil))
+    try expectPreV3WritesAbort(legacy)
+    try fixture.checkStoredValues()
+    // The v3 ledger still writes every fenced table.
+    let ledger = try Ledger(path: fixture.path, cipher: TestFieldCipher())
+    let run = try await ledger.startSyncRun(connectionID: "test", at: Fixture.at)
+    try await ledger.recordHoldings(connectionID: "test", runID: run, at: Fixture.at, [Fixture.holding])
+    try await ledger.setCursor(connectionID: "test", stream: .transactions, value: Fixture.at)
+    try await ledger.finishSyncRun(id: run, ok: true, accounts: 1, rows: 0, error: nil)
+    try await ledger.markSynced(connectionID: "test", at: Fixture.at)
+    #expect(try await ledger.latestHoldings(accountID: 1) == [Fixture.holding])
+    #expect(try await ledger.cursor(connectionID: "test", stream: .transactions) == Fixture.at)
 }
 
 @Test func freshDatabaseStartsAtV3WithWriterTriggers() throws {

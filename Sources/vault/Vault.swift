@@ -57,7 +57,7 @@ struct VaultCLI {
                 exit(1)
             }
         case "migrate":
-            let backup = try optionalValue(arguments, "--backup")
+            let backup = try migrateBackupPath(arguments)
             let ledger = try Ledger(
                 path: databasePath, cipher: AppleFieldCipher(secrets: KeychainSecretStore()),
                 legacy: .convert(backupPath: backup)
@@ -130,6 +130,7 @@ struct VaultCLI {
                 }
             )
         case "schedule":
+            try expectFlags(arguments, allowed: scheduleFlags)
             let environment = arguments.contains("--require-egress") ? ["VAULT_REQUIRE_EGRESS": "1"] : [:]
             let scheduler = LaunchAgentScheduler(
                 executable: try LaunchAgentScheduler.resolveCurrentExecutable(), environment: environment
@@ -188,12 +189,23 @@ struct VaultCLI {
         return value
     }
 
-    static func optionalValue(_ arguments: [String], _ flag: String) throws -> String? {
-        guard let index = arguments.firstIndex(of: flag) else { return nil }
-        guard index + 1 < arguments.count, !arguments[index + 1].isEmpty else {
-            throw CLIError.usage("\(flag) <path> needs a value")
+    /// Parses `migrate [--backup PATH]` before the database is opened. Anything else, `--backup=PATH` or a
+    /// misspelled option included, is rejected: ignoring it would convert without the requested rollback copy.
+    static func migrateBackupPath(_ arguments: [String]) throws -> String? {
+        if arguments.isEmpty { return nil }
+        guard arguments.count == 2, arguments[0] == "--backup", !arguments[1].isEmpty, !arguments[1].hasPrefix("-") else {
+            throw CLIError.usage("usage: vault migrate [--backup PATH]")
         }
-        return arguments[index + 1]
+        return arguments[1]
+    }
+
+    static let scheduleFlags: Set = ["--off", "--require-egress"]
+
+    /// Rejects anything but the given flags, so a mistyped option can't silently run the default behavior.
+    static func expectFlags(_ arguments: [String], allowed: Set<String>) throws {
+        if let unknown = arguments.first(where: { !allowed.contains($0) }) {
+            throw CLIError.usage("unknown option \(unknown); expected \(allowed.sorted().joined(separator: ", "))")
+        }
     }
 
     static func printTable(_ headers: [String], _ rows: [[String]]) {
