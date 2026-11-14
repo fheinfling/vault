@@ -58,7 +58,7 @@ jobs:
       review_where: ${{ steps.read.outputs.review_where }}
       bootstrap: ${{ steps.read.outputs.bootstrap }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - name: Trusted kit from base branch
         run: eval "$TRUSTED_KIT_FN"; trusted_kit
@@ -76,7 +76,7 @@ jobs:
     if: github.event_name != 'pull_request_review'
     runs-on: ${{ needs.policy.outputs.runs_on }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - name: Trusted kit from base branch
         run: |
@@ -94,7 +94,7 @@ jobs:
     outputs:
       tier: ${{ steps.risk.outputs.tier }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0, ref: "${{ github.event.pull_request.head.sha }}" }
       - name: Trusted kit from base branch
         run: |
@@ -103,7 +103,7 @@ jobs:
           cp _trusted/REVIEW.md REVIEW.md 2>/dev/null || true
           git update-index --assume-unchanged quality.toml REVIEW.md 2>/dev/null || true
       - name: Restore finding ledger for this PR (no repeats, track open findings)
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .quality
           key: quality-${{ github.event.pull_request.number }}-${{ github.run_id }}
@@ -136,7 +136,7 @@ jobs:
             || gh pr comment ${{ github.event.pull_request.number }} --body-file .quality/packet.md
           gh pr edit ${{ github.event.pull_request.number }} --remove-label risk:t0,risk:t1,risk:t2 >/dev/null 2>&1 || true
           gh pr edit ${{ github.event.pull_request.number }} --add-label "risk:t$(jq .tier .quality/risk.json)" || true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with: { name: quality-evidence, path: .quality/, include-hidden-files: true }
 
   # Required check #2 (with `checks`). Passes only when the review for THIS head
@@ -153,7 +153,7 @@ jobs:
           [ "${{ needs.checks.result }}" = "success" ] || { echo "checks failed against latest main"; exit 1; }
           echo "Approvals and review were enforced before the PR could enter the queue."
       # The PR head, so approval_gate.py can recompute the tier floor from the diff against the base.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: github.event_name != 'merge_group'
         with: { fetch-depth: 0, ref: "${{ github.event.pull_request.head.sha }}" }
       - name: Trusted kit from base branch (a PR that installs or upgrades the gate stops here)
@@ -168,7 +168,7 @@ jobs:
             exit 1
           fi
           cp _trusted/quality.toml quality.toml
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         if: github.event_name == 'pull_request' && needs.policy.outputs.review_where == 'ci' && needs.review.result == 'success'
         with: { name: quality-evidence, path: .quality }
       - name: Evidence from this head's latest review run (approval events, ci mode)
