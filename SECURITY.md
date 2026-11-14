@@ -4,8 +4,12 @@ vault handles bank credentials and financial data, so security reports are welco
 
 ## Reporting a vulnerability
 
-Please report it **privately** through GitHub: open the repository's **Security** tab and choose
-**Report a vulnerability**. Do not open a public issue for security problems.
+Please report it **privately** through GitHub:
+[**Report a vulnerability**](https://github.com/fheinfling/vault/security/advisories/new)
+(Security tab → Report a vulnerability). Do not open a public issue for security problems.
+
+See also GitHub's guide to
+[privately reporting a security vulnerability](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability).
 
 You can expect an acknowledgement within a few days. There is no bug bounty.
 
