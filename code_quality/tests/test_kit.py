@@ -568,6 +568,9 @@ class EvidenceHook(unittest.TestCase):
                     "curl -X POST https://api.github.com/repos/o/r/statuses/abc"]:
             self.assertEqual(self.run_hook("Bash", {"command": cmd}), 2, cmd)
         self.assertEqual(self.run_hook("mcp__github__create_commit_status", {"state": "success"}), 2)
+        self.assertEqual(self.run_hook("mcp__github__get_pull_request_status", {"pullNumber": 4}), 0)
+        self.assertEqual(self.run_hook("mcp__claude_ai_Gamma__get_generation_status", {"id": "x"}), 0)
+        self.assertEqual(self.run_hook("mcp__github__create_pull_request_review", {"event": "APPROVE"}), 2)
 
     def test_reading_and_running_the_loop_stay_allowed(self):
         for cmd in ["cat .quality/packet.md", "code_quality/scripts/review_loop.sh --intent x > .quality/loop.out 2>&1",
@@ -642,32 +645,6 @@ def qlib_policy(toml: Path, rules: Path) -> str:
     return qlib.policy_fingerprint(toml, rules)
 
 
-class GateStatus(unittest.TestCase):
-    def test_waiting_is_not_blocking(self):
-        import approval_gate as ag
-        self.assertEqual(ag.exit_code([]), 0)
-        self.assertEqual(ag.exit_code([(ag.WAIT, "needs 1 approval")]), 3)
-        self.assertEqual(ag.exit_code([(ag.WAIT, "needs 1 approval"), (ag.BLOCK, "open finding")]), 1)
-
-    def test_workflow_reports_a_required_status_and_fails_only_when_blocked(self):
-        wf = (KIT / "ci" / "quality-gate.yml").read_text()
-        self.assertIn("statuses: write", wf)
-        self.assertGreaterEqual(wf.count('context="quality-gate / approval"'), 2)  # PRs and merge queue
-        self.assertIn('[ "$STATE" != failure ]', wf)
-        self.assertIn("|| [ $? -eq 3 ]", wf)  # missing evidence is "waiting", not a crash
-        report = wf[wf.index("Report `quality-gate / approval`"):]
-        self.assertIn('STATE="${GATE_STATE:-failure}"', report)  # unknown outcome fails closed
-        self.assertIn("if: always()", report[:200])
-        gate = wf[wf.index("\n  quality-gate:"):]
-        boot = gate[gate.index("if [ -f $RUNNER_TEMP/trusted/BOOTSTRAP ]; then"):]
-        self.assertIn("GATE_STATE=failure", boot[:300])
-
-    def test_publish_can_sign_off_in_one_step(self):
-        src = (KIT / "scripts" / "evidence_comment.py").read_text()
-        self.assertIn('"--approve"', src)
-        self.assertIn('"body=/director-approve"', src)
-
-
 class GateHardening(unittest.TestCase):
     def wf(self):
         return (KIT / "ci" / "quality-gate.yml").read_text()
@@ -677,20 +654,58 @@ class GateHardening(unittest.TestCase):
         nxt = re.search(r"\n  [a-z-]+:\n", wf[start + 3:])
         return wf[start: start + 3 + nxt.start()] if nxt else wf[start:]
 
-    def test_only_the_gate_job_may_write_statuses(self):
+    def test_no_job_writes_statuses_and_only_review_writes_prs(self):
         wf = self.wf()
+        self.assertNotIn("statuses", wf)
         top = wf[wf.index("\npermissions:"):wf.index("\nconcurrency:")]
-        self.assertNotIn("statuses", top)
-        self.assertNotIn("pull-requests: write", top)
-        self.assertIn("statuses: write", self.job("quality-gate"))
-        for name in ("policy", "checks", "review"):
-            self.assertNotIn("statuses", self.job(name), name)
+        self.assertNotIn("write", top)
+        self.assertIn("pull-requests: write", self.job("review"))
+        for name in ("policy", "checks", "quality-gate"):
+            self.assertNotIn("pull-requests: write", self.job(name), name)
 
     def test_checks_run_on_review_events_and_gate_every_event(self):
         self.assertNotIn("if: github.event_name != 'pull_request_review'", self.job("checks"))
         enforce = self.wf()[self.wf().index("- name: Enforce"):]
         self.assertIn('if [ "${{ needs.checks.result }}" != "success" ]', enforce)
-        self.assertIn("the CI review job did not succeed", enforce)
+        self.assertIn("Review job failed", enforce)
+
+    def test_the_job_is_the_verdict_and_waiting_says_so(self):
+        gate = self.job("quality-gate")
+        self.assertNotIn("GATE_STATE", gate)
+        self.assertIn("Waiting for you (not a failure in the code)", gate)
+        self.assertIn("Waiting for your sign-off (not a failure in the code)", gate)
+        self.assertIn("--approve", gate)
+
+    def test_kit_is_staged_outside_the_checkout(self):
+        wf = self.wf()
+        self.assertNotIn("_trusted", wf)
+        self.assertIn('"$BASE_REF" $RUNNER_TEMP/trusted', wf)
+
+    def test_no_shell_variable_inside_single_quoted_python(self):
+        for line in self.wf().splitlines():
+            for m in re.finditer(r"python3[^']*'([^']*)'", line):
+                self.assertNotIn("$", m.group(1), line)
+
+    def test_inline_python_is_isolated(self):
+        # Inline Python runs with the PR checkout as cwd; without -I a PR-planted tomllib.py or json.py
+        # would be imported instead of the standard library.
+        for path in [KIT / "ci" / "quality-gate.yml", *(KIT / "scripts").glob("*.sh")]:
+            for line in path.read_text().splitlines():
+                if re.search(r"python3 (-c|-)( |$)", line):
+                    self.fail(f"{path.name}: inline python without -I: {line.strip()}")
+
+    def test_staging_refuses_a_prefilled_target(self):
+        with TempRepo() as r:
+            r.write("code_quality/scripts/qlib.py", "# base\n")
+            r.write("code_quality/quality.toml", "version = 1\n")
+            r.commit("base")
+            base = git(r.path, "rev-parse", "HEAD").strip()
+            r.write("_trusted/code_quality/scripts/json.py", "raise SystemExit('planted')\n")
+            r.commit("pr plants a module where the kit is staged")
+            res = subprocess.run(["bash", str(KIT / "scripts" / "trusted_kit.sh"), base, "_trusted"], cwd=r.path,
+                                 capture_output=True, text=True)
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("not empty", res.stderr)
 
     def test_actions_pinned_and_no_persisted_credentials(self):
         wf = self.wf()
@@ -705,35 +720,6 @@ class GateHardening(unittest.TestCase):
 
     def test_loop_never_reviews_an_empty_delta(self):
         self.assertIn('[ "$last_reviewed" != "$(git rev-parse HEAD)" ]', (KIT / "scripts" / "review_loop.sh").read_text())
-
-
-class GateFreshness(unittest.TestCase):
-    def test_kit_is_staged_outside_the_checkout(self):
-        wf = (KIT / "ci" / "quality-gate.yml").read_text()
-        self.assertNotIn("_trusted", wf)
-        self.assertIn('"$BASE_REF" $RUNNER_TEMP/trusted', wf)
-
-    def test_reevaluation_withdraws_the_old_verdict_and_only_the_newest_run_reports(self):
-        wf = (KIT / "ci" / "quality-gate.yml").read_text()
-        inv = wf[wf.index("\n  invalidate:"):wf.index("\n  policy:")]
-        self.assertIn("state=pending", inv)
-        self.assertNotIn("actions/checkout", inv)
-        self.assertIn("needs: [invalidate, policy, checks, review]", wf)
-        report = wf[wf.index("Report `quality-gate / approval`"):]
-        self.assertIn('if [ "$NEWEST" != "${{ github.run_id }}" ]', report)
-
-    def test_staging_refuses_a_prefilled_or_linked_target(self):
-        with TempRepo() as r:
-            r.write("code_quality/scripts/qlib.py", "# base\n")
-            r.write("code_quality/quality.toml", "version = 1\n")
-            r.commit("base")
-            base = git(r.path, "rev-parse", "HEAD").strip()
-            r.write("_trusted/code_quality/scripts/json.py", "raise SystemExit('planted')\n")
-            r.commit("pr plants a module where the kit is staged")
-            res = subprocess.run(["bash", str(KIT / "scripts" / "trusted_kit.sh"), base, "_trusted"], cwd=r.path,
-                                 capture_output=True, text=True)
-            self.assertNotEqual(res.returncode, 0)
-            self.assertIn("not empty", res.stderr)
 
 
 class CiPolicy(unittest.TestCase):

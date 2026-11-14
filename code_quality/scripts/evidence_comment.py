@@ -122,10 +122,10 @@ def publish(args: argparse.Namespace) -> None:
                 "-f", "event=COMMENT", "-f", "body=/director-approve")
         print(f"/director-approve submitted on {sha[:10]}; the gate re-runs on the review event")
         return
-    # The workflow has no comment trigger, so re-run this head's latest quality-gate job by hand;
-    # it then reads the new comment.
+    # The workflow has no comment trigger, so re-run the quality-gate job of this commit's newest run
+    # (whatever its event); it then reads the new comment.
     run = qlib.sh("gh", "run", "list", "--repo", repo, "--workflow", "quality-gate.yml", "--commit", sha,
-                  "--event", "pull_request", "--limit", "1", "--json", "databaseId,status",
+                  "--limit", "1", "--json", "databaseId,status",
                   "-q", '.[0] | select(.status == "completed") | .databaseId', check=False).strip()
     job = run and qlib.sh("gh", "run", "view", run, "--repo", repo, "--json", "jobs",
                           "-q", '.jobs[] | select(.name == "quality-gate") | .databaseId', check=False).strip()

@@ -24,8 +24,8 @@ Usage (in GitHub Actions, with GH_TOKEN set):
   approval_gate.py --pr 123 --base <base-sha> --config _trusted/quality.toml \
       --risk .quality/risk.json --review .quality/review-<sha>.json
 Exit 0 = mergeable, 3 = waiting on a human (no approval yet, or the evidence is for an older
-commit), 1 = blocked (open findings, wrong review depth or policy). The workflow reports 3 as a
-pending commit status, so "waiting for you" never looks like a failure.
+commit), 1 = blocked (open findings, wrong review depth or policy). The job fails on both 3 and 1,
+but says "waiting for you" plainly for 3.
 """
 
 from __future__ import annotations

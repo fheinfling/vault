@@ -86,7 +86,7 @@ if any(MARKER_RE.search(t) for t in texts):
 
 # MCP tools (GitHub and others) act on the remote directly: no approving, merging or signing off
 # through them either. Path rules don't apply; they have no local file argument.
-MCP_APPROVE_TOOL = re.compile(r"(merge|approve|review|status|check_run|checkrun)", re.I)
+MCP_APPROVE_TOOL = re.compile(r"(merge|approve|(create|submit|add|update)_?\w*review|(create|update|set)_?\w*(status|check_?run))", re.I)
 if tool.startswith("mcp__"):
     if MCP_APPROVE_TOOL.search(tool) or any(APPROVE_RE.search(t) or "/director-approve" in t for t in texts):
         block("Blocked: agents never approve, sign off on, or merge PRs, through any tool. "

@@ -29,7 +29,7 @@ if [ "$HOOK" = "--hook" ]; then
 fi
 
 CMDS=()
-while IFS= read -r line; do [ -n "$line" ] && CMDS+=("$line"); done < <(python3 - "$MODE" <<'PY'
+while IFS= read -r line; do [ -n "$line" ] && CMDS+=("$line"); done < <(python3 -I - "$MODE" <<'PY'
 import sys, tomllib, pathlib, subprocess
 root = pathlib.Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
 for p in (root / "quality.toml", root / "code_quality" / "quality.toml"):
@@ -62,7 +62,7 @@ done
 if [ "$MODE" = "full" ]; then
   base="${QUALITY_BASE:-origin/main}"
   if git rev-parse --verify -q "$base" >/dev/null; then
-    n=$(python3 "$HERE/check_test_integrity.py" --base "$base" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["findings"]))')
+    n=$(python3 "$HERE/check_test_integrity.py" --base "$base" | python3 -I -c 'import json,sys; print(len(json.load(sys.stdin)["findings"]))')
     [ "$n" -gt 0 ] && echo "NOTE  $n test-integrity signal(s) — the verifier will check whether they are justified (cross_review.py)."
   fi
 fi

@@ -1,9 +1,6 @@
 # .github/workflows/quality-gate.yml
-# Make the `checks` and `quality-gate` jobs AND the `quality-gate / approval` commit status REQUIRED
-# (branch ruleset), with the status's source pinned to the GitHub Actions app (a status posted with
-# a personal token must not count). The job is required too, so a re-evaluation still running blocks
-# the merge. Upgrading from kit v2 (which required only the jobs): change the ruleset BEFORE merging
-# v3, because in v3 the job passes while the status is pending. Enable the
+# Make the `checks` and `quality-gate` jobs REQUIRED status checks (branch ruleset), with their
+# source pinned to GitHub Actions, and enable the
 # merge queue, and turn on "dismiss stale approvals on new push". Do not also
 # require a fixed number of GitHub approvals in the ruleset — this job enforces
 # the tier-dependent number (0/1/2) itself.
@@ -54,21 +51,6 @@ env:
   TRUSTED_KIT_FN: 'trusted_kit() { if git cat-file -e "$BASE_REF:code_quality/scripts/trusted_kit.sh" 2>/dev/null; then git show "$BASE_REF:code_quality/scripts/trusted_kit.sh" | bash -s -- "$BASE_REF" $RUNNER_TEMP/trusted; else bash code_quality/scripts/trusted_kit.sh "$BASE_REF" $RUNNER_TEMP/trusted; fi; }'
 
 jobs:
-  invalidate:
-    # Any earlier verdict for this commit is withdrawn the moment a re-evaluation starts (new push,
-    # review submitted or dismissed), so a stale green status never stands while the gate re-runs.
-    # Runs no repository code: no checkout, only this API call.
-    if: github.event_name != 'merge_group'
-    runs-on: ubuntu-latest
-    permissions:
-      statuses: write
-    steps:
-      - env: { GH_TOKEN: "${{ github.token }}" }
-        run: |
-          gh api -X POST "repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }}" \
-            -f state=pending -f context="quality-gate / approval" -f description="re-evaluating" \
-            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >/dev/null
-
   policy:
     # Reads the BASE branch's policy once and exposes the values the workflow needs before a job
     # can start: which runner runs the checks, and whether reviewers run here or locally.
@@ -133,7 +115,7 @@ jobs:
           restore-keys: quality-${{ github.event.pull_request.number }}-
       - name: Install agent CLIs (versions pinned in the base branch's quality.toml)
         run: |
-          read -r CLAUDE_CLI CODEX_CLI < <(python3 -c 'import tomllib; a = tomllib.load(open("$RUNNER_TEMP/trusted/quality.toml", "rb"))["agents"]; print(a["claude_cli"], a["codex_cli"])')
+          read -r CLAUDE_CLI CODEX_CLI < <(python3 -I -c 'import sys, tomllib; a = tomllib.load(open(sys.argv[1], "rb"))["agents"]; print(a["claude_cli"], a["codex_cli"])' "$RUNNER_TEMP/trusted/quality.toml")
           npm i -g "@anthropic-ai/claude-code@${CLAUDE_CLI}" "@openai/codex@${CODEX_CLI}"
       - name: Risk tier
         id: risk
@@ -166,24 +148,23 @@ jobs:
   # commit has no open blockers and the tier's number of HUMAN approvals exist on
   # THIS head commit. Re-evaluated whenever a review is submitted or dismissed.
   quality-gate:
+    # The verdict is this job: green when the review and the human sign-off are complete for the head
+    # commit, red otherwise. "Waiting for you" is red too, but says so plainly at the top of the check.
+    # Every re-evaluation (push, review submitted or dismissed) creates a new run of this job, so the
+    # required check is pending while it runs and never shows a stale result.
     if: always()
-    needs: [invalidate, policy, checks, review]
+    needs: [policy, checks, review]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read    # reviews and comments on this PR
       actions: read          # ci mode: the evidence artifact of this head's review run
-      statuses: write        # the required `quality-gate / approval` status
     steps:
       - name: Merge queue
         if: github.event_name == 'merge_group'
-        env: { GH_TOKEN: "${{ github.token }}" }
         run: |
-          STATE=success; DESC="checks passed against the latest main"
-          [ "${{ needs.checks.result }}" = "success" ] || { STATE=failure; DESC="checks failed against the latest main"; }
-          gh api -X POST "repos/${{ github.repository }}/statuses/${{ github.event.merge_group.head_sha }}" \
-            -f state="$STATE" -f context="quality-gate / approval" -f description="$DESC" >/dev/null
-          echo "$DESC"; [ "$STATE" = success ]
+          [ "${{ needs.checks.result }}" = "success" ] || { echo "checks failed against latest main"; exit 1; }
+          echo "Approvals and review were enforced before the PR could enter the queue."
       # The PR head, so approval_gate.py can recompute the tier floor from the diff against the base.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name != 'merge_group'
@@ -195,10 +176,7 @@ jobs:
           # Checked in the staging step itself, before any staged script runs: on a bootstrap PR those
           # scripts are the PR's own, so nothing they report can be trusted, including "not bootstrap".
           if [ -f $RUNNER_TEMP/trusted/BOOTSTRAP ]; then
-            echo "GATE_STATE=failure" >> "$GITHUB_ENV"
-            echo "GATE_DESC=installs or upgrades the gate itself: read the evidence, merge deliberately" >> "$GITHUB_ENV"
-            echo "❌ This PR installs or upgrades the quality gate itself ($(cat $RUNNER_TEMP/trusted/BOOTSTRAP)), so the gate cannot judge it."
-            echo "Read the evidence and merge it deliberately (ruleset bypass for admins). This check never passes it."
+            echo "::error title=Installs or upgrades the quality gate::$(cat $RUNNER_TEMP/trusted/BOOTSTRAP). The gate cannot judge a change to itself: read the evidence and merge deliberately (admin bypass)."
             exit 1
           fi
           cp $RUNNER_TEMP/trusted/quality.toml quality.toml
@@ -212,7 +190,10 @@ jobs:
           RUN=$(gh run list --workflow quality-gate.yml --commit "${{ github.event.pull_request.head.sha }}" \
                 --event pull_request --json databaseId,status,conclusion \
                 -q '[.[] | select(.status=="completed" and .conclusion!="cancelled")][0].databaseId')
-          [ -n "$RUN" ] || { echo "no finished review run for this head yet; wait for it, or re-run the PR workflow"; exit 1; }
+          if [ -z "$RUN" ]; then
+            echo "::error title=Waiting for the review run::The review for this commit has not finished yet. When it has, re-run this job."
+            exit 1
+          fi
           gh run download "$RUN" -n quality-evidence -D .quality
       - name: Evidence published from a local review (local mode)
         if: github.event_name != 'merge_group' && needs.policy.outputs.review_where == 'local'
@@ -220,49 +201,33 @@ jobs:
         run: |
           python3 $RUNNER_TEMP/trusted/code_quality/scripts/evidence_comment.py fetch --pr ${{ github.event.pull_request.number }} \
             --sha "${{ github.event.pull_request.head.sha }}" --config $RUNNER_TEMP/trusted/quality.toml --out .quality \
-            || [ $? -eq 3 ]   # 3 = no evidence yet: Enforce reports "waiting"
+            || [ $? -eq 3 ]   # 3 = no evidence yet: Enforce says "waiting for you"
       - name: Enforce
         if: github.event_name != 'merge_group'
         env: { GH_TOKEN: "${{ github.token }}" }
         run: |
-          set +e
-          verdict() { echo "GATE_STATE=$1" >> "$GITHUB_ENV"; echo "GATE_DESC=$2" >> "$GITHUB_ENV"; }
+          WAIT="python3 code_quality/scripts/evidence_comment.py publish --pr ${{ github.event.pull_request.number }} --approve"
           if [ "${{ needs.checks.result }}" != "success" ]; then   # every event: checks ran in this run
-            verdict failure "deterministic checks failed"; echo "❌ deterministic checks failed"; exit 0
+            echo "::error title=Checks failed::The deterministic checks failed for this commit."; exit 1
           fi
           if [ "${{ needs.policy.outputs.review_where }}" = "ci" ] && [ "${{ github.event_name }}" = "pull_request" ] \
              && [ "${{ needs.review.result }}" != "success" ]; then
-            verdict failure "the CI review job did not succeed (${{ needs.review.result }})"; echo "❌ review job: ${{ needs.review.result }}"; exit 0
+            echo "::error title=Review job failed::The CI review job ended with '${{ needs.review.result }}'."; exit 1
           fi
           if [ ! -f .quality/review-head.json ]; then
-            verdict pending "waiting for review evidence (evidence_comment.py publish --approve)"; exit 0
+            echo "::error title=⏳ Waiting for you (not a failure in the code)::No review evidence for this commit yet. Review it locally, then run: $WAIT"
+            exit 1
           fi
           # The tier is re-derived from the base policy (floor = path rules on this diff); the published
           # risk.json may only raise it, and approvals_required in it is ignored.
+          set +e
           python3 $RUNNER_TEMP/trusted/code_quality/scripts/approval_gate.py --pr ${{ github.event.pull_request.number }} \
             --base "$BASE_REF" --config $RUNNER_TEMP/trusted/quality.toml \
             --risk .quality/risk.json --review .quality/review-head.json
-          case $? in
-            0) verdict success "review and approvals complete for this commit" ;;
-            3) verdict pending "waiting for your sign-off (/director-approve) on this commit" ;;
-            *) verdict failure "blocked: open findings or invalid review evidence (see log)" ;;
+          rc=$?
+          set -e
+          case $rc in
+            0) ;;
+            3) echo "::error title=⏳ Waiting for your sign-off (not a failure in the code)::Run: $WAIT"; exit 1 ;;
+            *) exit 1 ;;
           esac
-      # Reported as its own commit status, so the ruleset can require it: pending (yellow) while waiting
-      # on a human, never a red failure for that. This job fails only when the gate is really blocked.
-      - name: Report `quality-gate / approval`
-        if: always() && github.event_name != 'merge_group'
-        env: { GH_TOKEN: "${{ github.token }}" }
-        run: |
-          STATE="${GATE_STATE:-failure}"; DESC="${GATE_DESC:-the gate did not finish; see the log}"
-          # Only the newest run for this commit may set the verdict: an older run that finishes late must
-          # not overwrite a newer one (for example a success computed before an approval was dismissed).
-          NEWEST=$(gh api "repos/${{ github.repository }}/actions/workflows/quality-gate.yml/runs?head_sha=${{ github.event.pull_request.head.sha }}&per_page=1" --jq '.workflow_runs[0].id')
-          if [ "$NEWEST" != "${{ github.run_id }}" ]; then
-            echo "a newer run ($NEWEST) owns the verdict for this commit; not reporting $STATE"
-            [ "$STATE" != failure ]; exit
-          fi
-          gh api -X POST "repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }}" \
-            -f state="$STATE" -f context="quality-gate / approval" -f description="${DESC:0:140}" \
-            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >/dev/null
-          echo "quality-gate / approval: $STATE: $DESC"
-          [ "$STATE" != failure ]

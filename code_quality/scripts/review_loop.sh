@@ -34,12 +34,12 @@ if git cat-file -e "$BASE:quality.toml" 2>/dev/null; then
   echo "Reviewing under the base branch's policy ($BASE)."
 fi
 if [ -z "$DEPTH" ]; then  # Tier 2 is reviewed deep; approval_gate.py rejects anything less for it
-  FLOOR_TIER="$(python3 "$HERE/classify_risk.py" --base "$BASE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tier"])')"
+  FLOOR_TIER="$(python3 "$HERE/classify_risk.py" --base "$BASE" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["tier"])')"
   [ "$FLOOR_TIER" = "2" ] && DEPTH="--depth deep" && echo "Tier 2 change: deep review (every deep_families member)."
 fi
 STATE="$ROOT/.quality"; mkdir -p "$STATE"; [ -f "$STATE/.gitignore" ] || echo '*' > "$STATE/.gitignore"
 
-cfg() { python3 -c "import sys; sys.path.insert(0,'$HERE'); import qlib; c=qlib.load_config(); print($1)"; }
+cfg() { python3 -I -c "import sys; sys.path.insert(0,'$HERE'); import qlib; c=qlib.load_config(); print($1)"; }
 IMPL="$(cfg 'c["agents"]["implementer"]')"
 MAX_ROUNDS="$(cfg 'c["review"].get("max_rounds",3)')"
 DIFF_ONLY_AFTER="$(cfg 'c["review"].get("diff_only_after_round",2)')"
