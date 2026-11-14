@@ -94,8 +94,8 @@ Then:
 3. **Make CLAUDE.md specific.** Add the single-test command, misleading
    patterns, and decisions not in the code. Keep it short.
 4. **GitHub settings.**
-   - Ruleset on `main`: require PRs, require the `checks` check and the
-     `quality-gate / approval` commit status (pending while waiting on you, failure only
+   - Ruleset on `main`: require PRs, require the `checks` and `quality-gate`
+     checks and the `quality-gate / approval` commit status (pending while waiting on you, failure only
      when blocked) **with its source set to GitHub Actions**, so a status posted with a
      personal token does not count, dismiss stale approvals on push, require the merge queue,
      **require review from Code Owners**, and no bypass for bots or apps.

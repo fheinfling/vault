@@ -110,8 +110,11 @@ What a person with admin rights must do; put it in your report, do not attempt i
 
 - Secrets, only with `[review].where = "ci"`: `ANTHROPIC_API_KEY`; `OPENAI_API_KEY` only
   while `deep_families` includes codex. Local mode needs none.
-- Ruleset on the default branch: require pull requests, require the `checks` check
-  and the `quality-gate / approval` commit status (yellow while waiting on you, red only when
+- Upgrading from kit v2 (KIT_VERSION missing or 2): update the ruleset as below **before** merging the
+  upgrade. In v3 the `quality-gate` job passes while the approval status is pending, so a ruleset
+  that requires only the jobs would let PRs through without review or sign-off.
+- Ruleset on the default branch: require pull requests, require the `checks` and `quality-gate`
+  checks and the `quality-gate / approval` commit status (yellow while waiting on you, red only when
   blocked) **with its source set to GitHub Actions**, so a status posted with a personal token
   does not count, dismiss stale approvals on new pushes, enable the merge
   queue, no bypass for apps or bots. Give **repository admins** bypass permission: PRs

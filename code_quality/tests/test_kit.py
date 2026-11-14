@@ -627,13 +627,13 @@ class PolicyBinding(unittest.TestCase):
         wf = (KIT / "ci" / "quality-gate.yml").read_text()
         gate = wf[wf.index("\n  quality-gate:"):]
         staging = gate[gate.index('eval "$TRUSTED_KIT_FN"; trusted_kit'):]
-        check = staging.index("if [ -f _trusted/BOOTSTRAP ]")
-        first_script = staging.index("_trusted/code_quality/scripts/")
+        check = staging.index("if [ -f $RUNNER_TEMP/trusted/BOOTSTRAP ]")
+        first_script = staging.index("$RUNNER_TEMP/trusted/code_quality/scripts/")
         self.assertLess(check, first_script, "the bootstrap check must come before any staged script runs")
         self.assertIn("exit 1", staging[check:first_script])
         # The policy job reads the marker itself, not through a staged (possibly PR-supplied) script.
         policy = wf[wf.index("\n  policy:"):wf.index("\n  checks:")]
-        self.assertIn('if [ -f _trusted/BOOTSTRAP ]; then echo "bootstrap=true"', policy)
+        self.assertIn('if [ -f $RUNNER_TEMP/trusted/BOOTSTRAP ]; then echo "bootstrap=true"', policy)
         self.assertIn("grep -v '^bootstrap='", policy)
 
 
@@ -659,7 +659,7 @@ class GateStatus(unittest.TestCase):
         self.assertIn('STATE="${GATE_STATE:-failure}"', report)  # unknown outcome fails closed
         self.assertIn("if: always()", report[:200])
         gate = wf[wf.index("\n  quality-gate:"):]
-        boot = gate[gate.index("if [ -f _trusted/BOOTSTRAP ]; then"):]
+        boot = gate[gate.index("if [ -f $RUNNER_TEMP/trusted/BOOTSTRAP ]; then"):]
         self.assertIn("GATE_STATE=failure", boot[:300])
 
     def test_publish_can_sign_off_in_one_step(self):
@@ -705,6 +705,35 @@ class GateHardening(unittest.TestCase):
 
     def test_loop_never_reviews_an_empty_delta(self):
         self.assertIn('[ "$last_reviewed" != "$(git rev-parse HEAD)" ]', (KIT / "scripts" / "review_loop.sh").read_text())
+
+
+class GateFreshness(unittest.TestCase):
+    def test_kit_is_staged_outside_the_checkout(self):
+        wf = (KIT / "ci" / "quality-gate.yml").read_text()
+        self.assertNotIn("_trusted", wf)
+        self.assertIn('"$BASE_REF" $RUNNER_TEMP/trusted', wf)
+
+    def test_reevaluation_withdraws_the_old_verdict_and_only_the_newest_run_reports(self):
+        wf = (KIT / "ci" / "quality-gate.yml").read_text()
+        inv = wf[wf.index("\n  invalidate:"):wf.index("\n  policy:")]
+        self.assertIn("state=pending", inv)
+        self.assertNotIn("actions/checkout", inv)
+        self.assertIn("needs: [invalidate, policy, checks, review]", wf)
+        report = wf[wf.index("Report `quality-gate / approval`"):]
+        self.assertIn('if [ "$NEWEST" != "${{ github.run_id }}" ]', report)
+
+    def test_staging_refuses_a_prefilled_or_linked_target(self):
+        with TempRepo() as r:
+            r.write("code_quality/scripts/qlib.py", "# base\n")
+            r.write("code_quality/quality.toml", "version = 1\n")
+            r.commit("base")
+            base = git(r.path, "rev-parse", "HEAD").strip()
+            r.write("_trusted/code_quality/scripts/json.py", "raise SystemExit('planted')\n")
+            r.commit("pr plants a module where the kit is staged")
+            res = subprocess.run(["bash", str(KIT / "scripts" / "trusted_kit.sh"), base, "_trusted"], cwd=r.path,
+                                 capture_output=True, text=True)
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("not empty", res.stderr)
 
 
 class CiPolicy(unittest.TestCase):
