@@ -15,8 +15,13 @@ public struct AccountUpsertResult: Sendable, Equatable {
 /// The single writer to the vault database. All connectors' records go through here.
 public actor Ledger {
     private let db: Database
+    private let fields: FieldStorage
+    /// The pre-encryption schema version this open converted, or nil when there was nothing to convert.
+    public nonisolated let convertedLegacyVersion: Int64?
 
-    public init(path: String) throws {
+    /// Opens or creates the ledger. A database from before field encryption is converted only with
+    /// `legacy: .convert`; otherwise it is left untouched and `LegacyDatabaseError` is thrown.
+    public init(path: String, cipher: any FieldCipher, legacy: LegacyConversion = .refuse) throws {
         if path != ":memory:" {
             // A bare file name has no directory component; creating "" would fail.
             let directory = (path as NSString).deletingLastPathComponent
@@ -27,8 +32,9 @@ public actor Ledger {
                 )
             }
         }
-        db = try Database(path: path)
-        try Schema.migrate(db)
+        db = try Database(path: path, writer: true)
+        fields = FieldStorage(cipher: cipher)
+        convertedLegacyVersion = try Schema.migrate(db, fields: fields, legacy: legacy)
     }
 
     // MARK: - Connections
@@ -72,9 +78,10 @@ public actor Ledger {
                 try db.run(
                     """
                     INSERT INTO account
-                        (connection_id, external_id, provider, kind, name, iban_masked, currency, is_portfolio, hidden)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (connection_id, external_id, external_id_sealed, provider, kind, name, iban_masked, currency, is_portfolio, hidden)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(connection_id, external_id) DO UPDATE SET
+                        external_id_sealed = excluded.external_id_sealed,
                         provider = excluded.provider,
                         kind = excluded.kind,
                         name = excluded.name,
@@ -83,8 +90,10 @@ public actor Ledger {
                         is_portfolio = excluded.is_portfolio
                     """,
                     [
-                        .text(connectionID), .text(r.externalID), .text(r.provider), .text(r.kind.rawValue),
-                        .text(r.name), r.ibanMasked.map { .text($0) } ?? .null, .text(r.currency),
+                        .text(connectionID), fields.index(r.externalID, "account"),
+                        try fields.seal(r.externalID, "account.external_id_sealed"),
+                        try fields.seal(r.provider, "account.provider"), .text(r.kind.rawValue),
+                        try fields.seal(r.name, "account.name"), try fields.seal(r.ibanMasked, "account.iban_masked"), .text(r.currency),
                         .integer(r.isPortfolio ? 1 : 0), .integer(r.hidden ? 1 : 0),
                     ]
                 )
@@ -97,7 +106,7 @@ public actor Ledger {
                         (SELECT id FROM account WHERE connection_id = ? AND external_id = ?)
                     WHERE connection_id = ? AND external_id = ?
                     """,
-                    [.text(connectionID), .text(r.parentExternalID!), .text(connectionID), .text(r.externalID)]
+                    [.text(connectionID), fields.index(r.parentExternalID!, "account"), .text(connectionID), fields.index(r.externalID, "account")]
                 )
             }
             let after = try accountIDs(connectionID: connectionID)
@@ -111,11 +120,11 @@ public actor Ledger {
 
     public func accountIDs(connectionID: String) throws -> [String: Int64] {
         let rows = try db.query(
-            "SELECT id, external_id FROM account WHERE connection_id = ?", [.text(connectionID)]
+            "SELECT id, external_id_sealed FROM account WHERE connection_id = ?", [.text(connectionID)]
         )
         var map: [String: Int64] = [:]
         for row in rows {
-            if let id = row["id"]?.int64, let ext = row["external_id"]?.string { map[ext] = id }
+            if let id = row["id"]?.int64, let ext = try fields.open(row["external_id_sealed"], "account.external_id_sealed") { map[ext] = id }
         }
         return map
     }
@@ -123,34 +132,37 @@ public actor Ledger {
     public func accounts(includeHidden: Bool = false) throws -> [AccountSummary] {
         let rows = try db.query(
             """
-            SELECT a.id, a.connection_id, a.external_id, a.provider, a.kind, a.name, a.currency,
+            SELECT a.id, a.connection_id, a.external_id_sealed, a.provider, a.kind, a.name, a.currency,
                    a.is_portfolio, a.hidden, b.amount AS balance, b.at AS balance_at
             FROM account a
             LEFT JOIN balance_snapshot b ON b.id = (
                 SELECT id FROM balance_snapshot WHERE account_id = a.id ORDER BY at DESC, id DESC LIMIT 1
             )
             WHERE (? = 1 OR a.hidden = 0)
-            ORDER BY a.provider, a.is_portfolio, a.name
             """,
             [.integer(includeHidden ? 1 : 0)]
         )
-        return rows.compactMap { row in
+        return try rows.compactMap { row in
             guard let id = row["id"]?.int64,
                   let kind = row["kind"]?.string.flatMap(AccountKind.init(rawValue:))
             else { return nil }
             return AccountSummary(
                 id: id,
                 connectionID: row["connection_id"]?.string ?? "",
-                externalID: row["external_id"]?.string ?? "",
-                provider: row["provider"]?.string ?? "",
+                externalID: try fields.open(row["external_id_sealed"], "account.external_id_sealed") ?? "",
+                provider: try fields.open(row["provider"], "account.provider") ?? "",
                 kind: kind,
-                name: row["name"]?.string ?? "",
+                name: try fields.open(row["name"], "account.name") ?? "",
                 currency: row["currency"]?.string ?? "",
                 isPortfolio: row["is_portfolio"]?.bool ?? false,
                 hidden: row["hidden"]?.bool ?? false,
-                balance: row["balance"]?.string.flatMap { Decimal(string: $0) },
+                balance: try fields.open(row["balance"], "balance_snapshot.amount").flatMap { Decimal(string: $0) },
                 balanceAt: row["balance_at"]?.string.flatMap(Self.date)
             )
+        }.sorted {
+            if $0.provider != $1.provider { return $0.provider < $1.provider }
+            if $0.isPortfolio != $1.isPortfolio { return !$0.isPortfolio }
+            return $0.name < $1.name
         }
     }
 
@@ -172,7 +184,7 @@ public actor Ledger {
                     """,
                     [
                         .integer(accountID), .integer(runID), .text(Self.iso(r.at)),
-                        .text(Self.decimal(r.amount)), .text(r.currency),
+                        try fields.seal(Self.decimal(r.amount), "balance_snapshot.amount"), .text(r.currency),
                     ]
                 )
                 count += 1
@@ -186,9 +198,9 @@ public actor Ledger {
             "SELECT at, amount, currency FROM balance_snapshot WHERE account_id = ? ORDER BY at, id",
             [.integer(accountID)]
         )
-        return rows.compactMap { row in
+        return try rows.compactMap { row in
             guard let at = row["at"]?.string.flatMap(Self.date),
-                  let amount = row["amount"]?.string.flatMap({ Decimal(string: $0) })
+                  let amount = try fields.open(row["amount"], "balance_snapshot.amount").flatMap({ Decimal(string: $0) })
             else { return nil }
             return (at, amount, row["currency"]?.string ?? "")
         }
@@ -224,10 +236,10 @@ public actor Ledger {
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
-                        .integer(accountID), .integer(runID), .text(Self.iso(r.at)), r.isin.map { .text($0) } ?? .null,
-                        .text(r.name), .text(Self.decimal(r.quantity)),
-                        r.price.map { .text(Self.decimal($0)) } ?? .null,
-                        r.value.map { .text(Self.decimal($0)) } ?? .null, .text(r.currency),
+                        .integer(accountID), .integer(runID), .text(Self.iso(r.at)), try fields.seal(r.isin, "holding_snapshot.isin"),
+                        try fields.seal(r.name, "holding_snapshot.name"), try fields.seal(Self.decimal(r.quantity), "holding_snapshot.quantity"),
+                        try fields.seal(r.price.map(Self.decimal), "holding_snapshot.price"),
+                        try fields.seal(r.value.map(Self.decimal), "holding_snapshot.value"), .text(r.currency),
                     ]
                 )
                 count += 1
@@ -246,38 +258,39 @@ public actor Ledger {
         if let runID = latestSet {
             rows = try db.query(
                 """
-                SELECT h.*, a.external_id FROM holding_snapshot h
+                SELECT h.*, a.external_id_sealed FROM holding_snapshot h
                 JOIN account a ON a.id = h.account_id
                 WHERE h.account_id = ? AND h.run_id = ?
-                ORDER BY h.name, h.id
+                ORDER BY h.id
                 """,
                 [.integer(accountID), .integer(runID)]
             )
         } else {
             rows = try db.query(
                 """
-                SELECT h.*, a.external_id FROM holding_snapshot h
+                SELECT h.*, a.external_id_sealed FROM holding_snapshot h
                 JOIN account a ON a.id = h.account_id
                 WHERE h.account_id = ? AND h.run_id IS NULL
                   AND h.at = (SELECT MAX(at) FROM holding_snapshot WHERE account_id = ? AND run_id IS NULL)
-                ORDER BY h.name, h.id
+                ORDER BY h.id
                 """,
                 [.integer(accountID), .integer(accountID)]
             )
         }
-        return rows.compactMap { row in
+        return try rows.compactMap { row in
             guard let at = row["at"]?.string.flatMap(Self.date),
-                  let quantity = row["quantity"]?.string.flatMap({ Decimal(string: $0) })
+                  let quantity = try fields.open(row["quantity"], "holding_snapshot.quantity").flatMap({ Decimal(string: $0) })
             else { return nil }
             return HoldingRecord(
-                accountExternalID: row["external_id"]?.string ?? "",
-                at: at, isin: row["isin"]?.string, name: row["name"]?.string ?? "",
+                accountExternalID: try fields.open(row["external_id_sealed"], "account.external_id_sealed") ?? "",
+                at: at, isin: try fields.open(row["isin"], "holding_snapshot.isin"),
+                name: try fields.open(row["name"], "holding_snapshot.name") ?? "",
                 quantity: quantity,
-                price: row["price"]?.string.flatMap { Decimal(string: $0) },
-                value: row["value"]?.string.flatMap { Decimal(string: $0) },
+                price: try fields.open(row["price"], "holding_snapshot.price").flatMap { Decimal(string: $0) },
+                value: try fields.open(row["value"], "holding_snapshot.value").flatMap { Decimal(string: $0) },
                 currency: row["currency"]?.string ?? ""
             )
-        }
+        }.sorted { $0.name < $1.name }
     }
 
     // MARK: - Transactions and activities
@@ -293,9 +306,10 @@ public actor Ledger {
                 count += try db.run(
                     """
                     INSERT INTO "transaction"
-                        (account_id, external_id, booked_at, value_at, amount, currency, counterparty, purpose, category, booked, raw_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (account_id, external_id, external_id_sealed, booked_at, value_at, amount, currency, counterparty, purpose, category, booked, raw_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(account_id, external_id) DO UPDATE SET
+                        external_id_sealed = excluded.external_id_sealed,
                         booked_at = excluded.booked_at,
                         value_at = excluded.value_at,
                         amount = excluded.amount,
@@ -306,11 +320,12 @@ public actor Ledger {
                         raw_json = excluded.raw_json
                     """,
                     [
-                        .integer(accountID), .text(r.externalID), .text(Self.iso(r.bookedAt)),
-                        r.valueAt.map { .text(Self.iso($0)) } ?? .null, .text(Self.decimal(r.amount)),
-                        .text(r.currency), r.counterparty.map { .text($0) } ?? .null,
-                        r.purpose.map { .text($0) } ?? .null, r.category.map { .text($0) } ?? .null,
-                        .integer(r.booked ? 1 : 0), r.raw.map { .text($0) } ?? .null,
+                        .integer(accountID), fields.index(r.externalID, "transaction"),
+                        try fields.seal(r.externalID, "transaction.external_id_sealed"), .text(Self.iso(r.bookedAt)),
+                        r.valueAt.map { .text(Self.iso($0)) } ?? .null, try fields.seal(Self.decimal(r.amount), "transaction.amount"),
+                        .text(r.currency), try fields.seal(r.counterparty, "transaction.counterparty"),
+                        try fields.seal(r.purpose, "transaction.purpose"), try fields.seal(r.category, "transaction.category"),
+                        .integer(r.booked ? 1 : 0), try fields.seal(r.raw, "transaction.raw_json"),
                     ]
                 )
             }
@@ -328,22 +343,24 @@ public actor Ledger {
                 count += try db.run(
                     """
                     INSERT INTO activity
-                        (account_id, external_id, at, type, isin, quantity, price, fee, tax, amount, currency, raw_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (account_id, external_id, external_id_sealed, at, type, isin, quantity, price, fee, tax, amount, currency, raw_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(account_id, external_id) DO UPDATE SET
+                        external_id_sealed = excluded.external_id_sealed,
                         at = excluded.at, type = excluded.type, isin = excluded.isin,
                         quantity = excluded.quantity, price = excluded.price, fee = excluded.fee,
                         tax = excluded.tax, amount = excluded.amount, currency = excluded.currency,
                         raw_json = excluded.raw_json
                     """,
                     [
-                        .integer(accountID), .text(r.externalID), .text(Self.iso(r.at)), .text(r.type.rawValue),
-                        r.isin.map { .text($0) } ?? .null,
-                        r.quantity.map { .text(Self.decimal($0)) } ?? .null,
-                        r.price.map { .text(Self.decimal($0)) } ?? .null,
-                        r.fee.map { .text(Self.decimal($0)) } ?? .null,
-                        r.tax.map { .text(Self.decimal($0)) } ?? .null,
-                        .text(Self.decimal(r.amount)), .text(r.currency), r.raw.map { .text($0) } ?? .null,
+                        .integer(accountID), fields.index(r.externalID, "activity"),
+                        try fields.seal(r.externalID, "activity.external_id_sealed"), .text(Self.iso(r.at)), .text(r.type.rawValue),
+                        try fields.seal(r.isin, "activity.isin"),
+                        try fields.seal(r.quantity.map(Self.decimal), "activity.quantity"),
+                        try fields.seal(r.price.map(Self.decimal), "activity.price"),
+                        try fields.seal(r.fee.map(Self.decimal), "activity.fee"),
+                        try fields.seal(r.tax.map(Self.decimal), "activity.tax"),
+                        try fields.seal(Self.decimal(r.amount), "activity.amount"), .text(r.currency), try fields.seal(r.raw, "activity.raw_json"),
                     ]
                 )
             }

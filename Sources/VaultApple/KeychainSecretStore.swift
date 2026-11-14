@@ -7,7 +7,9 @@ import VaultCore
 /// Items created by a signed binary carry an access list naming that binary, so another program
 /// asking for the item triggers a Keychain prompt. Once the vault ships as a signed app with
 /// entitlements, switch to the data-protection keychain (`kSecUseDataProtectionKeychain`),
-/// which binds items to the team identifier instead.
+/// which binds items to the team identifier instead. Until then `kSecAttrAccessible` below has no
+/// effect: the file-based keychain ignores it, so items are not device-bound. An unsigned binary
+/// asking for the data-protection keychain gets `errSecMissingEntitlement` (-34018).
 public struct KeychainSecretStore: SecretStore {
     public let service: String
 
@@ -44,6 +46,19 @@ public struct KeychainSecretStore: SecretStore {
         guard status == errSecSuccess else {
             throw KeychainError(status: status, operation: "write \(key)")
         }
+    }
+
+    public func getOrCreate(_ key: String, create: () throws -> Data) throws -> Data {
+        if let existing = try get(key) { return existing }
+        let value = try create()
+        var insert = baseQuery(key)
+        insert[kSecValueData] = value
+        insert[kSecAttrAccessible] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        let status = SecItemAdd(insert as CFDictionary, nil)
+        if status == errSecSuccess { return value }
+        // Another CLI process may have created the shared field key since our read.
+        if status == errSecDuplicateItem, let existing = try get(key) { return existing }
+        throw KeychainError(status: status, operation: "create \(key)")
     }
 
     public func remove(_ key: String) throws {

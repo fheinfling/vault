@@ -24,7 +24,7 @@ private func holding(_ name: String, at: Date, quantity: Int = 1) -> HoldingReco
 }
 
 @Test func upsertAccountsIsIdempotentAndReportsNewOnes() async throws {
-    let ledger = try Ledger(path: ":memory:")
+    let ledger = try Ledger(path: ":memory:", cipher: TestFieldCipher())
     try await ledger.upsertConnection(id: "test", kind: .exchange)
     let first = try await ledger.upsertAccounts(connectionID: "test", sampleAccounts())
     let second = try await ledger.upsertAccounts(connectionID: "test", sampleAccounts())
@@ -38,7 +38,7 @@ private func holding(_ name: String, at: Date, quantity: Int = 1) -> HoldingReco
 }
 
 @Test func latestBalanceWinsAndHistoryIsKept() async throws {
-    let ledger = try Ledger(path: ":memory:")
+    let ledger = try Ledger(path: ":memory:", cipher: TestFieldCipher())
     try await ledger.upsertConnection(id: "test", kind: .exchange)
     try await ledger.upsertAccounts(connectionID: "test", sampleAccounts())
     let earlier = Date(timeIntervalSince1970: 1_700_000_000)
@@ -58,7 +58,7 @@ private func holding(_ name: String, at: Date, quantity: Int = 1) -> HoldingReco
 }
 
 @Test func oneBalancePerAccountPerRun() async throws {
-    let ledger = try Ledger(path: ":memory:")
+    let ledger = try Ledger(path: ":memory:", cipher: TestFieldCipher())
     try await ledger.upsertConnection(id: "test", kind: .exchange)
     try await ledger.upsertAccounts(connectionID: "test", sampleAccounts())
     let run = try await ledger.startSyncRun(connectionID: "test")
@@ -74,7 +74,7 @@ private func holding(_ name: String, at: Date, quantity: Int = 1) -> HoldingReco
 }
 
 @Test func emptiedDepotShowsNoHoldings() async throws {
-    let ledger = try Ledger(path: ":memory:")
+    let ledger = try Ledger(path: ":memory:", cipher: TestFieldCipher())
     try await ledger.upsertConnection(id: "test", kind: .exchange)
     let ids = try await ledger.upsertAccounts(connectionID: "test", sampleAccounts()).ids
     let depot = ids["depot"]!
@@ -89,7 +89,7 @@ private func holding(_ name: String, at: Date, quantity: Int = 1) -> HoldingReco
 }
 
 @Test func holdingsWithTheSameProviderTimestampAreNotMerged() async throws {
-    let ledger = try Ledger(path: ":memory:")
+    let ledger = try Ledger(path: ":memory:", cipher: TestFieldCipher())
     try await ledger.upsertConnection(id: "test", kind: .exchange)
     let depot = try await ledger.upsertAccounts(connectionID: "test", sampleAccounts()).ids["depot"]!
     // A provider stamps holdings with its valuation time; two runs four hours apart see the same stamp.
@@ -104,7 +104,7 @@ private func holding(_ name: String, at: Date, quantity: Int = 1) -> HoldingReco
 }
 
 @Test func transactionsUpsertOnExternalID() async throws {
-    let ledger = try Ledger(path: ":memory:")
+    let ledger = try Ledger(path: ":memory:", cipher: TestFieldCipher())
     try await ledger.upsertConnection(id: "test", kind: .exchange)
     try await ledger.upsertAccounts(connectionID: "test", sampleAccounts())
     let at = Date(timeIntervalSince1970: 1_700_000_000)
@@ -120,7 +120,7 @@ private func holding(_ name: String, at: Date, quantity: Int = 1) -> HoldingReco
 }
 
 @Test func cursorsRoundTripPerStream() async throws {
-    let ledger = try Ledger(path: ":memory:")
+    let ledger = try Ledger(path: ":memory:", cipher: TestFieldCipher())
     try await ledger.upsertConnection(id: "test", kind: .exchange)
     #expect(try await ledger.cursor(connectionID: "test", stream: .transactions) == nil)
     let at = Date(timeIntervalSince1970: 1_700_000_000)
@@ -130,7 +130,7 @@ private func holding(_ name: String, at: Date, quantity: Int = 1) -> HoldingReco
 }
 
 @Test func unknownAccountsAreSkippedNotStored() async throws {
-    let ledger = try Ledger(path: ":memory:")
+    let ledger = try Ledger(path: ":memory:", cipher: TestFieldCipher())
     try await ledger.upsertConnection(id: "test", kind: .exchange)
     try await ledger.upsertAccounts(connectionID: "test", sampleAccounts())
     let run = try await ledger.startSyncRun(connectionID: "test")
@@ -141,7 +141,7 @@ private func holding(_ name: String, at: Date, quantity: Int = 1) -> HoldingReco
 }
 
 @Test func syncRunsAreRecorded() async throws {
-    let ledger = try Ledger(path: ":memory:")
+    let ledger = try Ledger(path: ":memory:", cipher: TestFieldCipher())
     try await ledger.upsertConnection(id: "test", kind: .exchange)
     let id = try await ledger.startSyncRun(connectionID: "test")
     try await ledger.finishSyncRun(id: id, ok: false, accounts: 0, rows: 0, error: "boom")
@@ -156,7 +156,7 @@ private func holding(_ name: String, at: Date, quantity: Int = 1) -> HoldingReco
     defer {
         for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: name + suffix) }
     }
-    let ledger = try Ledger(path: name)
+    let ledger = try Ledger(path: name, cipher: TestFieldCipher())
     try await ledger.upsertConnection(id: "test", kind: .exchange)
     #expect(FileManager.default.fileExists(atPath: name))
 }
@@ -179,7 +179,10 @@ private func holding(_ name: String, at: Date, quantity: Int = 1) -> HoldingReco
             "INSERT INTO holding_snapshot (account_id, at, name, quantity, currency) VALUES (1, '2026-01-01T00:00:00Z', 'Legacy', '3', 'EUR')"
         )
     }
-    let ledger = try Ledger(path: path)
+    let before = try Data(contentsOf: URL(fileURLWithPath: path))
+    #expect(throws: LegacyDatabaseError.self) { try Ledger(path: path, cipher: TestFieldCipher()) }
+    #expect(try Data(contentsOf: URL(fileURLWithPath: path)) == before)
+    let ledger = try Ledger(path: path, cipher: TestFieldCipher(), legacy: .convert(backupPath: nil))
     let legacy = try await ledger.latestHoldings(accountID: 1)
     #expect(legacy.map(\.name) == ["Legacy"])
     // v2 features work on the migrated database.

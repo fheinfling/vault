@@ -20,6 +20,8 @@ struct VaultCLI {
           schedule [--off]        register (or remove) the launch agent, every 4 hours
             [--require-egress]    and set VAULT_REQUIRE_EGRESS=1 in its environment (kept on re-schedule)
           egress                  is this process confined by the egress allowlist?
+          migrate [--backup PATH] encrypt a database from before field encryption; with --backup, first
+                                  write a verified plaintext copy (needed to roll back to an older vault)
           db-path                 print the database path
 
         environment:
@@ -54,8 +56,22 @@ struct VaultCLI {
                 print("unconfined: \(reason)")
                 exit(1)
             }
+        case "migrate":
+            let backup = try migrateBackupPath(arguments)
+            let ledger = try Ledger(
+                path: databasePath, cipher: AppleFieldCipher(secrets: KeychainSecretStore()),
+                legacy: .convert(backupPath: backup)
+            )
+            guard let version = ledger.convertedLegacyVersion else {
+                print("nothing to migrate: the database has no pre-encryption data.")
+                return
+            }
+            print("encrypted the schema v\(version) database.")
+            if let backup {
+                print("plaintext pre-encryption backup: \(backup). Delete it once you no longer need to roll back.")
+            }
         case "accounts":
-            let ledger = try Ledger(path: databasePath)
+            let ledger = try Ledger(path: databasePath, cipher: AppleFieldCipher(secrets: KeychainSecretStore()))
             let accounts = try await ledger.accounts(includeHidden: arguments.contains("--all"))
             if accounts.isEmpty {
                 print("no accounts yet. run `vault sync` once a connector is configured.")
@@ -73,12 +89,12 @@ struct VaultCLI {
             )
         case "balances":
             let id = try requiredInt64(arguments, "--account")
-            let ledger = try Ledger(path: databasePath)
+            let ledger = try Ledger(path: databasePath, cipher: AppleFieldCipher(secrets: KeychainSecretStore()))
             let history = try await ledger.balanceHistory(accountID: id)
             printTable(["AT", "AMOUNT", "CCY"], history.map { [$0.at.formatted(.iso8601), "\($0.amount)", $0.currency] })
         case "holdings":
             let id = try requiredInt64(arguments, "--account")
-            let ledger = try Ledger(path: databasePath)
+            let ledger = try Ledger(path: databasePath, cipher: AppleFieldCipher(secrets: KeychainSecretStore()))
             let holdings = try await ledger.latestHoldings(accountID: id)
             printTable(
                 ["ISIN", "NAME", "QTY", "PRICE", "VALUE", "CCY"],
@@ -89,7 +105,7 @@ struct VaultCLI {
             )
         case "sync":
             try checkEgress()
-            let ledger = try Ledger(path: databasePath)
+            let ledger = try Ledger(path: databasePath, cipher: AppleFieldCipher(secrets: KeychainSecretStore()))
             let engine = SyncEngine(ledger: ledger, notifier: OSAScriptNotifier())
             var connectors = configuredConnectors()
             if !arguments.isEmpty {
@@ -104,7 +120,7 @@ struct VaultCLI {
                 print("\(result.connectionID): \(status), \(result.accounts) accounts, \(result.rows) rows\(result.message.map { ", \($0)" } ?? "")")
             }
         case "runs":
-            let ledger = try Ledger(path: databasePath)
+            let ledger = try Ledger(path: databasePath, cipher: AppleFieldCipher(secrets: KeychainSecretStore()))
             let runs = try await ledger.recentSyncRuns()
             printTable(
                 ["STARTED", "CONNECTION", "OK", "ACCOUNTS", "ROWS", "ERROR"],
@@ -114,6 +130,7 @@ struct VaultCLI {
                 }
             )
         case "schedule":
+            try expectFlags(arguments, allowed: scheduleFlags)
             let environment = arguments.contains("--require-egress") ? ["VAULT_REQUIRE_EGRESS": "1"] : [:]
             let scheduler = LaunchAgentScheduler(
                 executable: try LaunchAgentScheduler.resolveCurrentExecutable(), environment: environment
@@ -170,6 +187,25 @@ struct VaultCLI {
               let value = Int64(arguments[index + 1])
         else { throw CLIError.usage("\(flag) <number> is required") }
         return value
+    }
+
+    /// Parses `migrate [--backup PATH]` before the database is opened. Anything else, `--backup=PATH` or a
+    /// misspelled option included, is rejected: ignoring it would convert without the requested rollback copy.
+    static func migrateBackupPath(_ arguments: [String]) throws -> String? {
+        if arguments.isEmpty { return nil }
+        guard arguments.count == 2, arguments[0] == "--backup", !arguments[1].isEmpty, !arguments[1].hasPrefix("-") else {
+            throw CLIError.usage("usage: vault migrate [--backup PATH]")
+        }
+        return arguments[1]
+    }
+
+    static let scheduleFlags: Set = ["--off", "--require-egress"]
+
+    /// Rejects anything but the given flags, so a mistyped option can't silently run the default behavior.
+    static func expectFlags(_ arguments: [String], allowed: Set<String>) throws {
+        if let unknown = arguments.first(where: { !allowed.contains($0) }) {
+            throw CLIError.usage("unknown option \(unknown); expected \(allowed.sorted().joined(separator: ", "))")
+        }
     }
 
     static func printTable(_ headers: [String], _ rows: [[String]]) {
