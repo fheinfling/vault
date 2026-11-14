@@ -113,17 +113,14 @@ enum Schema {
         );
         """,
         // v3: sealed originals accompany blind indexes. Cleanup is retried after an interrupted open.
+        // A pre-v3 binary accepts any user_version and would insert plaintext rows whose external IDs
+        // never match the blind indexes, duplicating the ledger. The INSERT triggers abort its writes.
         """
         ALTER TABLE account ADD COLUMN external_id_sealed TEXT;
         ALTER TABLE "transaction" ADD COLUMN external_id_sealed TEXT;
         ALTER TABLE activity ADD COLUMN external_id_sealed TEXT;
         CREATE TABLE field_encryption_cleanup (pending INTEGER NOT NULL);
         INSERT INTO field_encryption_cleanup VALUES (1);
-        """,
-        // v4: a pre-v3 binary accepts any user_version and would insert plaintext rows whose external IDs
-        // never match the blind indexes, duplicating the ledger. Its writes must abort instead. This is its
-        // own migration so databases that already reached v3 get the triggers too.
-        """
         CREATE TRIGGER account_requires_v3 BEFORE INSERT ON account
         WHEN NEW.external_id_sealed IS NULL OR NEW.name NOT GLOB 'v1:*'
         BEGIN SELECT RAISE(ABORT, 'database requires vault >= v3'); END;

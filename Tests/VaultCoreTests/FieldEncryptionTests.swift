@@ -67,9 +67,16 @@ private struct Fixture {
         }
     }
 
+    func checkV3Schema() throws {
+        let db = try Database(path: path)
+        #expect(try db.query("PRAGMA user_version").first?["user_version"]?.int64 == 3)
+        let triggers = try db.query("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name").compactMap { $0["name"]?.string }
+        #expect(triggers == ["account", "activity", "balance_snapshot", "holding_snapshot", "transaction"].map { "\($0)_requires_v3" })
+    }
+
     func checkStoredValues() throws {
         let db = try Database(path: path)
-        #expect(try db.query("PRAGMA user_version").first?["user_version"]?.int64 == Int64(Schema.migrations.count))
+        #expect(try db.query("PRAGMA user_version").first?["user_version"]?.int64 == 3)
         #expect(try db.query("SELECT * FROM field_encryption_cleanup").isEmpty)
         for (table, values) in Self.values {
             let row = try #require(db.query("SELECT * FROM \"\(table)\"").first)
@@ -140,6 +147,7 @@ private struct Fixture {
     // Converting must migrate every table and remove old plaintext pages and WAL frames.
     let ledger = try Ledger(path: fixture.path, cipher: TestFieldCipher(), legacy: .convert(backupPath: nil))
     #expect(ledger.convertedLegacyVersion == 2)
+    try fixture.checkV3Schema()
     try fixture.checkStoredValues()
     try fixture.checkFiles()
     try await fixture.checkReadsAndUpserts()
@@ -180,6 +188,7 @@ private struct FailingMigrationCipher: FieldCipher {
         #expect(try db.query("PRAGMA user_version").first?["user_version"]?.int64 == 2)
         #expect(try db.query("SELECT name, external_id FROM account").first?["name"]?.string == "Giro")
         #expect(try db.query("PRAGMA table_info(account)").allSatisfy { $0["name"]?.string != "external_id_sealed" })
+        #expect(try db.query("SELECT name FROM sqlite_master WHERE type = 'trigger'").isEmpty)
     }
     _ = try Ledger(path: fixture.path, cipher: TestFieldCipher(), legacy: .convert(backupPath: nil))
     try fixture.checkStoredValues()
@@ -261,47 +270,38 @@ private func expectPreV3WritesAbort(_ db: Database) throws {
          """, [.text(Ledger.iso(Fixture.at))]),
     ]
     for (sql, values) in legacyWrites {
-        #expect(throws: DatabaseError.self, "pre-v3 write must abort: \(sql)") { try db.run(sql, values) }
+        do {
+            try db.run(sql, values)
+            Issue.record("pre-v3 write must abort: \(sql)")
+        } catch let error as DatabaseError {
+            #expect(error.message == "database requires vault >= v3")
+        }
     }
     for table in ["account", "balance_snapshot", "holding_snapshot", "transaction", "activity"] {
         #expect(try db.query("SELECT COUNT(*) AS n FROM \"\(table)\"").first?["n"]?.int64 == 1, "\(table) gained a row")
     }
 }
 
-@Test func preV3WritersAbortOnMigratedDatabase() async throws {
+@Test(arguments: [false, true]) func preV3WritersAbortOnV3Database(convertLegacy: Bool) async throws {
     let fixture = Fixture()
     defer { fixture.remove() }
-    try await fixture.write()
-    _ = try Ledger(path: fixture.path, cipher: TestFieldCipher())
+    if convertLegacy {
+        try fixture.writeV2()
+        _ = try Ledger(path: fixture.path, cipher: TestFieldCipher(), legacy: .convert(backupPath: nil))
+    } else {
+        try await fixture.write()
+    }
+    try fixture.checkV3Schema()
     try expectPreV3WritesAbort(try Database(path: fixture.path))
     try fixture.checkStoredValues()
 }
 
-/// A database sealed by the first encryption revision (2810028) is at v3 and has no writer triggers.
-@Test func v3DatabaseGainsWriterTriggersWithoutRewritingValues() throws {
+@Test func freshDatabaseStartsAtV3WithWriterTriggers() throws {
     let fixture = Fixture()
     defer { fixture.remove() }
-    try fixture.writeV2()
-    let sealedColumns = "SELECT * FROM account, balance_snapshot, holding_snapshot, \"transaction\", activity"
-    let before: [[String: SQLValue]]
-    do {
-        let db = try Database(path: fixture.path)
-        try db.transaction {
-            try db.execute(Schema.migrations[2])
-            try FieldStorage(cipher: TestFieldCipher()).migrate(db)
-            try db.execute("PRAGMA user_version = 3")
-        }
-        #expect(try db.query("SELECT name FROM sqlite_master WHERE type = 'trigger'").isEmpty)
-        before = try db.query(sealedColumns)
-    }
     let ledger = try Ledger(path: fixture.path, cipher: TestFieldCipher())
     #expect(ledger.convertedLegacyVersion == nil)
-    let db = try Database(path: fixture.path)
-    let triggers = try db.query("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name").compactMap { $0["name"]?.string }
-    #expect(triggers == ["account", "activity", "balance_snapshot", "holding_snapshot", "transaction"].map { "\($0)_requires_v3" })
-    #expect(try db.query(sealedColumns) == before)
-    try expectPreV3WritesAbort(db)
-    try fixture.checkStoredValues()
+    try fixture.checkV3Schema()
 }
 
 @Test func legacyDatabaseIsLeftUntouchedWithoutExplicitConversion() throws {
@@ -328,6 +328,7 @@ private func expectPreV3WritesAbort(_ db: Database) throws {
     try fixture.writeV2()
     let ledger = try Ledger(path: fixture.path, cipher: TestFieldCipher(), legacy: .convert(backupPath: backup))
     #expect(ledger.convertedLegacyVersion == 2)
+    try fixture.checkV3Schema()
     try fixture.checkStoredValues()
     try fixture.checkFiles()
     let mode = try FileManager.default.attributesOfItem(atPath: backup)[.posixPermissions] as? Int

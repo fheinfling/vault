@@ -65,8 +65,9 @@ entitlements; an ad-hoc-signed binary gets `errSecMissingEntitlement`), so the i
 the file-based login keychain: its access list names the vault binary, but it is **not**
 device-bound. A copy of the login keychain file plus its password exposes the key. The
 `ThisDeviceOnly` accessibility class takes effect once the app shell moves the item to the
-data-protection Keychain. Losing the Keychain item makes encrypted data
-unreadable. Processes that can obtain this key can decrypt the data.
+data-protection Keychain, a known follow-up that must preserve the existing key. Losing the
+Keychain item makes encrypted data unreadable. Processes that can obtain this key can decrypt
+the data.
 
 Residual plaintext metadata includes row IDs and relationships, connection IDs/kinds/status
 and action messages, account kinds/currencies/flags, all dates (ISO 8601 UTC), activity types,
@@ -86,9 +87,11 @@ path: to go back to a pre-encryption binary, stop vault and put the copy in plac
 reverting code alone cannot decrypt the converted database. Delete the copy once you no longer
 need to roll back. Without `--backup` there is no way back to a pre-encryption binary.
 
-Conversion seals every row in one transaction, then vacuums SQLite and truncates its WAL to
-remove old plaintext from the live files. Interrupted cleanup is retried on the next open;
-other database readers must close for cleanup to finish. Older copies, backups and filesystem
+The single field-encryption migration, v3 after unchanged v1/v2, adds the sealed-ID columns,
+cleanup marker and writer-protection BEFORE INSERT triggers, and seals every legacy row in
+one transaction. Fresh databases also start at v3 with these triggers. Conversion then vacuums
+SQLite and truncates its WAL to remove old plaintext from the live files. Interrupted cleanup
+is retried on the next open; other database readers must close for cleanup to finish. Older copies, backups and filesystem
 snapshots are not scrubbed. Do not run an older binary against a converted database; its writes
 abort with `database requires vault >= v3`.
 Keep the Keychain item for any encrypted databases you retain.
