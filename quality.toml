@@ -3,7 +3,8 @@
 #   - [risk].approvals.t2 = 1. There is one person. Tier 2 compensates with deep review (both model
 #     families hunt and verify) and execution verification; the sign-off is a forced read of the
 #     evidence packet plus an audit trail, not an independent check.
-#   - [risk].allow_model_t0 = false. The model may not lower anything to Tier 0 (see the note there).
+#   - [risk].allow_model_t0 = true, as in the solo profile; the vault floor still keeps every
+#     sensitive path out of reach (see the note there).
 #   - One vault floor puts all product code, the manifest, the scripts and the ignore rules at Tier 2.
 #   - [checks] are the repo's real build, test and dependency-check commands.
 # Nothing keeps this file in sync with the kit's profiles; kit updates never touch it.
@@ -92,10 +93,11 @@ humans = ["fheinfling"]
 # size limit; such merges are marked in risk.json and the packet for the weekly
 # sample. Team default: off until shadow mode shows the classifier's T0 calls match
 # yours (FLOW.md "Earning autonomy"). The solo profile (profiles/solo.toml) turns it on.
-# vault: off. Every product path is Tier 2 by floor, and there are no feature flags yet, so the
-# flag-gated Tier 0 path cannot apply.
-# Turn on only after shadow mode shows the classifier's T0 calls match yours (FLOW.md "Earning autonomy").
-allow_model_t0 = false
+# vault: on, as in the solo profile. The classifier may lower a change to Tier 0 only when no floor
+# matches, it is additive code behind a default-off flag, and it stays within the T0 size cap; such
+# merges are marked for the weekly sample. Every path under the vault floor (product code, manifest,
+# scripts, CI, ignore and attribute files) stays at Tier 2 regardless.
+allow_model_t0 = true
 
 # T0 (no human): EVERY changed file must match one of these globs, the diff
 # must be under the line limit, and no floor below may apply.
