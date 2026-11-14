@@ -69,7 +69,7 @@ private struct Fixture {
 
     func checkStoredValues() throws {
         let db = try Database(path: path)
-        #expect(try db.query("PRAGMA user_version").first?["user_version"]?.int64 == 3)
+        #expect(try db.query("PRAGMA user_version").first?["user_version"]?.int64 == Int64(Schema.migrations.count))
         #expect(try db.query("SELECT * FROM field_encryption_cleanup").isEmpty)
         for (table, values) in Self.values {
             let row = try #require(db.query("SELECT * FROM \"\(table)\"").first)
@@ -137,8 +137,9 @@ private struct Fixture {
     let fixture = Fixture()
     defer { fixture.remove() }
     try fixture.writeV2()
-    // Opening alone must migrate every table and remove old plaintext pages and WAL frames.
-    _ = try Ledger(path: fixture.path, cipher: TestFieldCipher())
+    // Converting must migrate every table and remove old plaintext pages and WAL frames.
+    let ledger = try Ledger(path: fixture.path, cipher: TestFieldCipher(), legacy: .convert(backupPath: nil))
+    #expect(ledger.convertedLegacyVersion == 2)
     try fixture.checkStoredValues()
     try fixture.checkFiles()
     try await fixture.checkReadsAndUpserts()
@@ -171,14 +172,16 @@ private struct FailingMigrationCipher: FieldCipher {
     let fixture = Fixture()
     defer { fixture.remove() }
     try fixture.writeV2()
-    #expect(throws: TestFieldCipher.Failure.self) { try Ledger(path: fixture.path, cipher: FailingMigrationCipher()) }
+    #expect(throws: TestFieldCipher.Failure.self) {
+        try Ledger(path: fixture.path, cipher: FailingMigrationCipher(), legacy: .convert(backupPath: nil))
+    }
     do {
         let db = try Database(path: fixture.path)
         #expect(try db.query("PRAGMA user_version").first?["user_version"]?.int64 == 2)
         #expect(try db.query("SELECT name, external_id FROM account").first?["name"]?.string == "Giro")
         #expect(try db.query("PRAGMA table_info(account)").allSatisfy { $0["name"]?.string != "external_id_sealed" })
     }
-    _ = try Ledger(path: fixture.path, cipher: TestFieldCipher())
+    _ = try Ledger(path: fixture.path, cipher: TestFieldCipher(), legacy: .convert(backupPath: nil))
     try fixture.checkStoredValues()
     try fixture.checkFiles()
 }
@@ -227,19 +230,15 @@ private struct FailingMigrationCipher: FieldCipher {
         let db = try Database(path: fixture.path)
         try db.run("UPDATE \"transaction\" SET purpose = ?", [.text(purpose)])
     }
-    _ = try Ledger(path: fixture.path, cipher: TestFieldCipher())
+    _ = try Ledger(path: fixture.path, cipher: TestFieldCipher(), legacy: .convert(backupPath: nil))
     let db = try Database(path: fixture.path)
     let row = try #require(db.query("SELECT purpose FROM \"transaction\"").first)
     #expect(try FieldStorage(cipher: TestFieldCipher()).open(row["purpose"], "transaction.purpose") == purpose)
 }
 
-/// Statements a pre-v3 binary (base commit 982b1b8) issues, with plaintext external IDs and values.
-@Test func preV3WritersAbortOnMigratedDatabase() async throws {
-    let fixture = Fixture()
-    defer { fixture.remove() }
-    try await fixture.write()
-    _ = try Ledger(path: fixture.path, cipher: TestFieldCipher())
-    let db = try Database(path: fixture.path)
+/// Issues the statements a pre-v3 binary (base commit 982b1b8) issues, with plaintext external IDs and values,
+/// and expects each to abort without adding a row.
+private func expectPreV3WritesAbort(_ db: Database) throws {
     let legacyWrites: [(String, [SQLValue])] = [
         ("""
          INSERT INTO account (connection_id, external_id, provider, kind, name, iban_masked, currency, is_portfolio, hidden)
@@ -267,5 +266,93 @@ private struct FailingMigrationCipher: FieldCipher {
     for table in ["account", "balance_snapshot", "holding_snapshot", "transaction", "activity"] {
         #expect(try db.query("SELECT COUNT(*) AS n FROM \"\(table)\"").first?["n"]?.int64 == 1, "\(table) gained a row")
     }
+}
+
+@Test func preV3WritersAbortOnMigratedDatabase() async throws {
+    let fixture = Fixture()
+    defer { fixture.remove() }
+    try await fixture.write()
+    _ = try Ledger(path: fixture.path, cipher: TestFieldCipher())
+    try expectPreV3WritesAbort(try Database(path: fixture.path))
     try fixture.checkStoredValues()
+}
+
+/// A database sealed by the first encryption revision (2810028) is at v3 and has no writer triggers.
+@Test func v3DatabaseGainsWriterTriggersWithoutRewritingValues() throws {
+    let fixture = Fixture()
+    defer { fixture.remove() }
+    try fixture.writeV2()
+    let sealedColumns = "SELECT * FROM account, balance_snapshot, holding_snapshot, \"transaction\", activity"
+    let before: [[String: SQLValue]]
+    do {
+        let db = try Database(path: fixture.path)
+        try db.transaction {
+            try db.execute(Schema.migrations[2])
+            try FieldStorage(cipher: TestFieldCipher()).migrate(db)
+            try db.execute("PRAGMA user_version = 3")
+        }
+        #expect(try db.query("SELECT name FROM sqlite_master WHERE type = 'trigger'").isEmpty)
+        before = try db.query(sealedColumns)
+    }
+    let ledger = try Ledger(path: fixture.path, cipher: TestFieldCipher())
+    #expect(ledger.convertedLegacyVersion == nil)
+    let db = try Database(path: fixture.path)
+    let triggers = try db.query("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name").compactMap { $0["name"]?.string }
+    #expect(triggers == ["account", "activity", "balance_snapshot", "holding_snapshot", "transaction"].map { "\($0)_requires_v3" })
+    #expect(try db.query(sealedColumns) == before)
+    try expectPreV3WritesAbort(db)
+    try fixture.checkStoredValues()
+}
+
+@Test func legacyDatabaseIsLeftUntouchedWithoutExplicitConversion() throws {
+    let fixture = Fixture()
+    defer { fixture.remove() }
+    try fixture.writeV2()
+    let before = try Data(contentsOf: URL(fileURLWithPath: fixture.path))
+    #expect(throws: LegacyDatabaseError.self) { try Ledger(path: fixture.path, cipher: TestFieldCipher()) }
+    let db = try Database(path: fixture.path)
+    #expect(try db.query("PRAGMA user_version").first?["user_version"]?.int64 == 2)
+    #expect(try db.query("SELECT name FROM account").first?["name"]?.string == "Giro")
+    #expect(try db.query("PRAGMA table_info(account)").allSatisfy { $0["name"]?.string != "external_id_sealed" })
+    #expect(try db.query("SELECT name FROM sqlite_master WHERE name = 'field_encryption_cleanup'").isEmpty)
+    #expect(try Data(contentsOf: URL(fileURLWithPath: fixture.path)) == before)
+}
+
+@Test func conversionWithBackupWritesVerifiedPlaintextCopyFirst() throws {
+    let fixture = Fixture()
+    let backup = fixture.path + ".pre-v3"
+    defer {
+        fixture.remove()
+        for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: backup + suffix) }
+    }
+    try fixture.writeV2()
+    let ledger = try Ledger(path: fixture.path, cipher: TestFieldCipher(), legacy: .convert(backupPath: backup))
+    #expect(ledger.convertedLegacyVersion == 2)
+    try fixture.checkStoredValues()
+    try fixture.checkFiles()
+    let mode = try FileManager.default.attributesOfItem(atPath: backup)[.posixPermissions] as? Int
+    #expect(mode == 0o600)
+    // The copy is exactly what a pre-v3 binary expects: schema v2 with plaintext rows.
+    let copy = try Database(path: backup)
+    #expect(try copy.query("PRAGMA user_version").first?["user_version"]?.int64 == 2)
+    #expect(try copy.query("SELECT name, external_id FROM account").first == ["name": .text("Giro"), "external_id": .text("DE00TEST")])
+    #expect(try copy.query("SELECT name FROM sqlite_master WHERE type = 'trigger'").isEmpty)
+}
+
+@Test func existingBackupFileStopsConversion() throws {
+    let fixture = Fixture()
+    let backup = fixture.path + ".pre-v3"
+    defer {
+        fixture.remove()
+        try? FileManager.default.removeItem(atPath: backup)
+    }
+    try fixture.writeV2()
+    try Data("keep me".utf8).write(to: URL(fileURLWithPath: backup))
+    #expect(throws: DatabaseError.self) {
+        try Ledger(path: fixture.path, cipher: TestFieldCipher(), legacy: .convert(backupPath: backup))
+    }
+    #expect(try Data(contentsOf: URL(fileURLWithPath: backup)) == Data("keep me".utf8))
+    let db = try Database(path: fixture.path)
+    #expect(try db.query("PRAGMA user_version").first?["user_version"]?.int64 == 2)
+    #expect(try db.query("SELECT name FROM account").first?["name"]?.string == "Giro")
 }

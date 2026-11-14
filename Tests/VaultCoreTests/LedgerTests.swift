@@ -179,7 +179,7 @@ private func holding(_ name: String, at: Date, quantity: Int = 1) -> HoldingReco
             "INSERT INTO holding_snapshot (account_id, at, name, quantity, currency) VALUES (1, '2026-01-01T00:00:00Z', 'Legacy', '3', 'EUR')"
         )
     }
-    let ledger = try Ledger(path: path, cipher: TestFieldCipher())
+    let ledger = try Ledger(path: path, cipher: TestFieldCipher(), legacy: .convert(backupPath: nil))
     let legacy = try await ledger.latestHoldings(accountID: 1)
     #expect(legacy.map(\.name) == ["Legacy"])
     // v2 features work on the migrated database.

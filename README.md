@@ -75,10 +75,20 @@ equality within a table; row counts, relationships and ciphertext lengths are al
 Connection identifiers, action messages and sync errors must not contain credentials or
 financial details.
 
-Opening an older database automatically migrates v1/v2 rows to v3 in a transaction, then
-vacuums SQLite and truncates its WAL to remove old plaintext from the live files. Interrupted
-cleanup is retried on the next open; other database readers must close for cleanup to finish.
-Older copies, backups and filesystem snapshots are not scrubbed. Do not run an older binary
-against a migrated database; its writes abort with `database requires vault >= v3`. To roll back to a pre-encryption binary, stop vault and restore a
-matching pre-v3 backup (which contains plaintext); reverting code alone cannot decrypt v3.
+A database from before field encryption (schema v1/v2) is never converted by ordinary
+commands; they stop with `database schema v2 predates field encryption`. Convert it explicitly:
+
+    vault migrate --backup ~/vault-pre-v3.db
+
+`--backup` first writes a plaintext copy of the unconverted database (mode 0600, refuses to
+overwrite an existing file) and checks it before anything is sealed. That copy is the rollback
+path: to go back to a pre-encryption binary, stop vault and put the copy in place of `vault.db`;
+reverting code alone cannot decrypt the converted database. Delete the copy once you no longer
+need to roll back. Without `--backup` there is no way back to a pre-encryption binary.
+
+Conversion seals every row in one transaction, then vacuums SQLite and truncates its WAL to
+remove old plaintext from the live files. Interrupted cleanup is retried on the next open;
+other database readers must close for cleanup to finish. Older copies, backups and filesystem
+snapshots are not scrubbed. Do not run an older binary against a converted database; its writes
+abort with `database requires vault >= v3`.
 Keep the Keychain item for any encrypted databases you retain.

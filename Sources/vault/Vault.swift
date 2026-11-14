@@ -20,6 +20,8 @@ struct VaultCLI {
           schedule [--off]        register (or remove) the launch agent, every 4 hours
             [--require-egress]    and set VAULT_REQUIRE_EGRESS=1 in its environment (kept on re-schedule)
           egress                  is this process confined by the egress allowlist?
+          migrate [--backup PATH] encrypt a database from before field encryption; with --backup, first
+                                  write a verified plaintext copy (needed to roll back to an older vault)
           db-path                 print the database path
 
         environment:
@@ -53,6 +55,20 @@ struct VaultCLI {
             case .unconfined(let reason):
                 print("unconfined: \(reason)")
                 exit(1)
+            }
+        case "migrate":
+            let backup = try optionalValue(arguments, "--backup")
+            let ledger = try Ledger(
+                path: databasePath, cipher: AppleFieldCipher(secrets: KeychainSecretStore()),
+                legacy: .convert(backupPath: backup)
+            )
+            guard let version = ledger.convertedLegacyVersion else {
+                print("nothing to migrate: the database has no pre-encryption data.")
+                return
+            }
+            print("encrypted the schema v\(version) database.")
+            if let backup {
+                print("plaintext pre-encryption backup: \(backup). Delete it once you no longer need to roll back.")
             }
         case "accounts":
             let ledger = try Ledger(path: databasePath, cipher: AppleFieldCipher(secrets: KeychainSecretStore()))
@@ -170,6 +186,14 @@ struct VaultCLI {
               let value = Int64(arguments[index + 1])
         else { throw CLIError.usage("\(flag) <number> is required") }
         return value
+    }
+
+    static func optionalValue(_ arguments: [String], _ flag: String) throws -> String? {
+        guard let index = arguments.firstIndex(of: flag) else { return nil }
+        guard index + 1 < arguments.count, !arguments[index + 1].isEmpty else {
+            throw CLIError.usage("\(flag) <path> needs a value")
+        }
+        return arguments[index + 1]
     }
 
     static func printTable(_ headers: [String], _ rows: [[String]]) {

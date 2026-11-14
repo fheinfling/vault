@@ -16,8 +16,12 @@ public struct AccountUpsertResult: Sendable, Equatable {
 public actor Ledger {
     private let db: Database
     private let fields: FieldStorage
+    /// The pre-encryption schema version this open converted, or nil when there was nothing to convert.
+    public nonisolated let convertedLegacyVersion: Int64?
 
-    public init(path: String, cipher: any FieldCipher) throws {
+    /// Opens or creates the ledger. A database from before field encryption is converted only with
+    /// `legacy: .convert`; otherwise it is left untouched and `LegacyDatabaseError` is thrown.
+    public init(path: String, cipher: any FieldCipher, legacy: LegacyConversion = .refuse) throws {
         if path != ":memory:" {
             // A bare file name has no directory component; creating "" would fail.
             let directory = (path as NSString).deletingLastPathComponent
@@ -30,7 +34,7 @@ public actor Ledger {
         }
         db = try Database(path: path)
         fields = FieldStorage(cipher: cipher)
-        try Schema.migrate(db, fields: fields)
+        convertedLegacyVersion = try Schema.migrate(db, fields: fields, legacy: legacy)
     }
 
     // MARK: - Connections

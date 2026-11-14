@@ -119,8 +119,11 @@ enum Schema {
         ALTER TABLE activity ADD COLUMN external_id_sealed TEXT;
         CREATE TABLE field_encryption_cleanup (pending INTEGER NOT NULL);
         INSERT INTO field_encryption_cleanup VALUES (1);
-        -- A pre-v3 binary accepts this user_version and would insert plaintext rows whose external IDs
-        -- never match the blind indexes, duplicating the ledger. Its writes must abort instead.
+        """,
+        // v4: a pre-v3 binary accepts any user_version and would insert plaintext rows whose external IDs
+        // never match the blind indexes, duplicating the ledger. Its writes must abort instead. This is its
+        // own migration so databases that already reached v3 get the triggers too.
+        """
         CREATE TRIGGER account_requires_v3 BEFORE INSERT ON account
         WHEN NEW.external_id_sealed IS NULL OR NEW.name NOT GLOB 'v1:*'
         BEGIN SELECT RAISE(ABORT, 'database requires vault >= v3'); END;
@@ -139,8 +142,22 @@ enum Schema {
         """,
     ]
 
-    static func migrate(_ db: Database, fields: FieldStorage) throws {
+    /// The schema version written by the last migration that left sensitive fields in plaintext.
+    static let lastPlaintextVersion: Int64 = 2
+
+    /// Runs pending migrations and returns the legacy version it converted, if any.
+    ///
+    /// Sealing a v1/v2 database rewrites it in place, and a pre-v3 binary cannot read the result, so it
+    /// only happens when the caller asked for it. A fresh database has no plaintext to convert.
+    @discardableResult
+    static func migrate(_ db: Database, fields: FieldStorage, legacy: LegacyConversion = .refuse) throws -> Int64? {
         let current = try db.query("PRAGMA user_version").first?["user_version"]?.int64 ?? 0
+        var converted: Int64?
+        if (1...lastPlaintextVersion).contains(current) {
+            guard case .convert(let backupPath) = legacy else { throw LegacyDatabaseError(version: current) }
+            if let backupPath { try backup(db, version: current, to: backupPath) }
+            converted = current
+        }
         for (index, sql) in migrations.enumerated() where index >= Int(current) {
             try db.transaction {
                 try db.execute(sql)
@@ -157,5 +174,52 @@ enum Schema {
             }
             try db.run("DELETE FROM field_encryption_cleanup")
         }
+        return converted
+    }
+
+    /// Copies the unconverted database to a new owner-only file and checks the copy before anything is sealed.
+    private static func backup(_ db: Database, version: Int64, to path: String) throws {
+        func failure(_ what: String) -> DatabaseError {
+            DatabaseError(code: 0, message: "backup \(path): \(what): \(String(cString: strerror(errno)))")
+        }
+        // VACUUM INTO creates its file with the umask's mode, so write it inside a private directory
+        // first, then link it into place; link never replaces an existing file.
+        let directory = (path as NSString).deletingLastPathComponent
+        var template = Array(((directory.isEmpty ? "." : directory) + "/.vault-backup-XXXXXX").utf8CString)
+        guard let staging = mkdtemp(&template).map({ String(cString: $0) }) else { throw failure("cannot create staging directory") }
+        let staged = staging + "/backup.db"
+        defer {
+            for suffix in ["", "-wal", "-shm"] { unlink(staged + suffix) }
+            rmdir(staging)
+        }
+        try db.run("VACUUM INTO ?", [.text(staged)])
+        guard chmod(staged, 0o600) == 0 else { throw failure("cannot restrict permissions") }
+        guard link(staged, path) == 0 else { throw failure("cannot create") }
+        let copy = try Database(path: path)
+        guard try copy.query("PRAGMA integrity_check").first?["integrity_check"]?.string == "ok",
+              try copy.query("PRAGMA user_version").first?["user_version"]?.int64 == version
+        else { throw DatabaseError(code: 0, message: "backup \(path) failed verification") }
+        for table in ["account", "balance_snapshot", "holding_snapshot", "transaction", "activity"] {
+            let count = "SELECT COUNT(*) AS n FROM \"\(table)\""
+            guard try copy.query(count).first?["n"] == db.query(count).first?["n"] else {
+                throw DatabaseError(code: 0, message: "backup \(path) failed verification")
+            }
+        }
+    }
+}
+
+/// What opening the ledger may do to a database written before field encryption (schema v1/v2).
+public enum LegacyConversion: Sendable, Equatable {
+    /// Leave a legacy database untouched and throw `LegacyDatabaseError`.
+    case refuse
+    /// Seal legacy rows in place. With a backup path, first copy the plaintext database there (mode 0600,
+    /// must not exist yet) and verify the copy, so a pre-v3 binary can be restored.
+    case convert(backupPath: String?)
+}
+
+public struct LegacyDatabaseError: Error, CustomStringConvertible, Sendable {
+    public let version: Int64
+    public var description: String {
+        "database schema v\(version) predates field encryption; run `vault migrate --backup <path>` to convert it"
     }
 }
