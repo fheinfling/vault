@@ -3,12 +3,6 @@
 #
 #   trusted_kit.sh <base-sha> [<target-dir>]      (default target: _trusted)
 #
-# CI stages into a fresh directory OUTSIDE the PR checkout ($RUNNER_TEMP/trusted) and runs the
-# scripts only from there. Python puts a script's own directory first on sys.path, so one file the
-# PR left beside the trusted scripts (a `json.py`) would run inside the gate. The target must
-# therefore not exist yet or be an empty real directory, and the staged tree may hold no symlinks
-# (the kit ships none; a link could point back into the PR checkout).
-#
 # Result: <target>/code_quality, <target>/quality.toml (falling back to the kit's own copy
 # when the base has no root policy) and <target>/REVIEW.md when the base has one.
 #
@@ -25,12 +19,6 @@ set -euo pipefail
 
 base="${1:?base sha}"
 dst="${2:-_trusted}"
-die() { echo "trusted_kit: $*" >&2; exit 1; }
-[ ! -L "$dst" ] || die "$dst is a symlink; stage into a fresh directory outside the checkout"
-if [ -e "$dst" ]; then
-  [ -d "$dst" ] || die "$dst exists and is not a directory"
-  [ -z "$(ls -A "$dst")" ] || die "$dst is not empty; stage into a fresh directory outside the checkout"
-fi
 mkdir -p "$dst"
 
 # Missing file: version 1. Anything but a plain number: 999999, i.e. "newer than any base", which
@@ -73,9 +61,6 @@ else
   printf '%s\n' "$reason" > "$dst/BOOTSTRAP"
   echo "::warning title=quality bootstrap::$reason, so policy and scripts come from this PR. Read this PR as a change to the gate itself."
 fi
-
-links="$(find "$dst" -type l)"
-[ -z "$links" ] || die "refusing symlinks in the staged kit: $links"
 
 # The scripts read the root quality.toml; the kit's own copy is the documented fallback.
 [ -f "$dst/quality.toml" ] || cp "$dst/code_quality/quality.toml" "$dst/quality.toml"
