@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """Carry local review evidence to the PR, and back. For [review].where = "local".
 
-  evidence_comment.py publish --pr N [--repo owner/name]
+  evidence_comment.py publish --pr N [--approve] [--repo owner/name]
       Posts .quality/packet.md plus the machine-readable risk.json and review-<head>.json as one
       PR comment. Run it after review_loop.sh converged, from the same checkout, with the head
-      commit already pushed.
+      commit already pushed. --approve also submits your sign-off on that commit, so one command
+      is the whole human step: an APPROVE review when you are not the PR author (a bot-opened
+      PR), a `/director-approve` review when you are (GitHub won't let authors approve).
 
   evidence_comment.py fetch --pr N --sha <head> [--repo owner/name] [--config quality.toml] [--out .quality]
       CI: finds the newest evidence comment for that head commit, posted by a human listed in
       [risk].humans, and writes risk.json and review-head.json for approval_gate.py.
-      No such comment: exit 1. The gate fails closed.
+      No such comment: exit 3 ("waiting"), nothing written. The gate stays closed.
 
 Trust: only comments by a human from [risk].humans count; bots and other accounts are ignored.
 The evidence itself was produced by the loop on that person's machine, so local mode rests on
@@ -93,6 +95,25 @@ def current_repo(explicit: str | None) -> str:
     return explicit or qlib.sh("gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner").strip()
 
 
+def sign_off(me: str, pr: dict, cfg: dict) -> tuple[str, str, str | None]:
+    """-> (review event, body, warning or None) for the human `me` signing off on `pr`.
+
+    approval_gate.py counts two kinds of sign-off: an APPROVED review by anyone in [risk].humans,
+    and, for the PR author only (GitHub won't let authors approve), a review whose body is the
+    director marker. So a non-author approves; only the author uses the marker."""
+    author = (pr.get("user") or {}).get("login", "")
+    if me.lower() != author.lower():
+        return "APPROVE", "Approved after reading the local review evidence for this commit.", None
+    labels = {l["name"] for l in pr.get("labels", [])}
+    humans = {h.lower() for h in cfg["risk"].get("humans", [])}
+    missing = [why for ok, why in [
+        (cfg["risk"].get("director_counts_as_reviewer"), "[risk].director_counts_as_reviewer is off"),
+        ("agent-authored" in labels, "the PR lacks the agent-authored label"),
+        (me.lower() in humans, f"{me} is not in [risk].humans")] if not ok]
+    note = ("your director sign-off will not count: " + "; ".join(missing)) if missing else None
+    return "COMMENT", "/director-approve", note
+
+
 def publish(args: argparse.Namespace) -> None:
     st = qlib.state_dir()
     sha = qlib.sh("git", "rev-parse", "HEAD").strip()
@@ -105,7 +126,8 @@ def publish(args: argparse.Namespace) -> None:
     if review.get("sha") != sha or risk.get("sha") != sha:
         sys.exit(f"evidence_comment: the evidence is for another commit than HEAD {sha[:10]}; re-run the loop")
     repo = current_repo(args.repo)
-    head = gh(f"repos/{repo}/pulls/{args.pr}")["head"]["sha"]
+    pr = gh(f"repos/{repo}/pulls/{args.pr}")
+    head = pr["head"]["sha"]
     if head != sha:
         sys.exit(f"evidence_comment: PR head is {head[:10]} but local HEAD is {sha[:10]}; push first")
     body = render(paths["packet"].read_text(), risk, review)
@@ -113,17 +135,30 @@ def publish(args: argparse.Namespace) -> None:
         fh.write(body)
     qlib.sh("gh", "pr", "comment", str(args.pr), "--repo", repo, "--body-file", fh.name)
     print(f"evidence for {sha[:10]} published to {repo}#{args.pr}")
-    # The workflow has no comment trigger, and a PR needing no approval gets no review event, so
-    # re-run the failed jobs of this head's latest run; quality-gate then reads the new comment.
+    if args.approve:
+        # Your sign-off on exactly this commit. The review event re-runs the gate by itself.
+        # Pinned to the commit the evidence is for: if the head moved meanwhile, the sign-off stays on
+        # that commit and does not count for the new one.
+        me = qlib.sh("gh", "api", "user", "-q", ".login").strip()
+        event, text, note = sign_off(me, pr, qlib.load_config())
+        if note:
+            print(f"warning: {note}", file=sys.stderr)
+        qlib.sh("gh", "api", "-X", "POST", f"repos/{repo}/pulls/{args.pr}/reviews", "-f", f"commit_id={sha}",
+                "-f", f"event={event}", "-f", f"body={text}")
+        print(f"{event} review submitted on {sha[:10]}; the gate re-runs on the review event")
+        return
+    # The workflow has no comment trigger, so re-run the quality-gate job of this commit's newest run
+    # (whatever its event); it then reads the new comment.
     run = qlib.sh("gh", "run", "list", "--repo", repo, "--workflow", "quality-gate.yml", "--commit", sha,
-                  "--event", "pull_request", "--limit", "1", "--json", "databaseId,status,conclusion",
-                  "-q", '.[0] | select(.status == "completed" and .conclusion == "failure") | .databaseId',
-                  check=False).strip()
-    if run:
-        qlib.sh("gh", "run", "rerun", run, "--repo", repo, "--failed", check=False)
-        print(f"re-running the failed jobs of quality-gate run {run}")
+                  "--limit", "1", "--json", "databaseId,status",
+                  "-q", '.[0] | select(.status == "completed") | .databaseId', check=False).strip()
+    job = run and qlib.sh("gh", "run", "view", run, "--repo", repo, "--json", "jobs",
+                          "-q", '.jobs[] | select(.name == "quality-gate") | .databaseId', check=False).strip()
+    if job:
+        qlib.sh("gh", "run", "rerun", run, "--repo", repo, "--job", job, check=False)
+        print(f"re-running the quality-gate job of run {run}")
     else:
-        print("no failed quality-gate run for this head to re-run; if the gate is still red, re-run it once")
+        print("no finished quality-gate run for this head yet; it will read the comment when it runs")
 
 
 def fetch(args: argparse.Namespace) -> None:
@@ -135,9 +170,9 @@ def fetch(args: argparse.Namespace) -> None:
     comments = gh_list(f"repos/{repo}/issues/{args.pr}/comments?per_page=100")
     data = select(comments, args.sha, humans)
     if data is None:
-        print(f"❌ No evidence comment for {args.sha[:10]} by a human in [risk].humans. "
-              "Run review_loop.sh locally on that commit, then evidence_comment.py publish.")
-        sys.exit(1)
+        print(f"⏳ No evidence comment for {args.sha[:10]} by a human in [risk].humans yet. "
+              "Run review_loop.sh locally on that commit, then evidence_comment.py publish --approve.")
+        sys.exit(3)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     qlib.write_json(out / "risk.json", data["risk"])
@@ -150,6 +185,7 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("publish")
     p.add_argument("--pr", required=True)
+    p.add_argument("--approve", action="store_true", help="also sign off on the head commit: APPROVE, or /director-approve if you authored the PR")
     p.add_argument("--repo")
     f = sub.add_parser("fetch")
     f.add_argument("--pr", required=True)

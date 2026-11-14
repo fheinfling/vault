@@ -5,6 +5,10 @@ version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
+    # Owned by the vendored code_quality kit and overwritten on every kit update; its actions are
+    # bumped upstream in the kit.
+    exclude-paths:
+      - .github/workflows/quality-gate.yml
     schedule:
       interval: weekly
     cooldown:

@@ -110,8 +110,8 @@ What a person with admin rights must do; put it in your report, do not attempt i
 
 - Secrets, only with `[review].where = "ci"`: `ANTHROPIC_API_KEY`; `OPENAI_API_KEY` only
   while `deep_families` includes codex. Local mode needs none.
-- Ruleset on the default branch: require pull requests, require the `checks` and
-  `quality-gate` status checks, dismiss stale approvals on new pushes, enable the merge
+- Ruleset on the default branch: require pull requests, require the `checks` and `quality-gate`
+  status checks (source: GitHub Actions), dismiss stale approvals on new pushes, enable the merge
   queue, no bypass for apps or bots. Give **repository admins** bypass permission: PRs
   that install or upgrade the kit fail `quality-gate` on purpose (the gate can't judge a
   change to itself) and are merged deliberately after reading the local evidence.

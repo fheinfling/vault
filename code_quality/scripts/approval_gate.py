@@ -22,8 +22,11 @@ itself allows (allow_model_t0, no floor rule hit, within the T0 size limit).
 
 Usage (in GitHub Actions, with GH_TOKEN set):
   approval_gate.py --pr 123 --base <base-sha> --config _trusted/quality.toml \
-      --risk .quality/risk.json --review .quality/review-<sha>.json
-Exit 0 = mergeable, 1 = not yet.
+      --risk "$EVIDENCE_DIR/risk.json" --review "$EVIDENCE_DIR/review-head.json"
+CI sets EVIDENCE_DIR to a fresh directory under RUNNER_TEMP, outside the PR checkout.
+Exit 0 = mergeable, 3 = waiting on a human (no approval yet, or the evidence is for an older
+commit), 1 = blocked (open findings, wrong review depth or policy). The job fails on both 3 and 1,
+but says "waiting for you" plainly for 3.
 """
 
 from __future__ import annotations
@@ -77,6 +80,16 @@ def policy_problem(review: dict, config_path: str) -> str | None:
     return None
 
 
+WAIT, BLOCK = "wait", "block"
+
+
+def exit_code(problems: list[tuple[str, str]]) -> int:
+    """0 ready, 3 only waiting on a human, 1 anything blocking."""
+    if any(kind == BLOCK for kind, _ in problems):
+        return 1
+    return 3 if problems else 0
+
+
 def gh(path: str) -> dict:
     return json.loads(qlib.sh("gh", "api", path))
 
@@ -101,17 +114,22 @@ def main() -> None:
     repo = args.repo or qlib.sh("gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner").strip()
     pr = gh(f"repos/{repo}/pulls/{args.pr}")
     head = pr["head"]["sha"]
-    risk = json.load(open(args.risk))
-    review = json.load(open(args.review))
+    checked_out = qlib.sh("git", "rev-parse", "HEAD").strip()
+    if head != checked_out:
+        print(f"❌ Not mergeable: live PR head {head[:10]} differs from the checked-out commit "
+              f"{checked_out[:10]}; run the gate on the current head.")
+        sys.exit(1)
+    risk = json.loads(Path(args.risk).read_text())
+    review = json.loads(Path(args.review).read_text())
 
-    problems = []
+    problems: list[tuple[str, str]] = []
     if review.get("sha") != head:
-        problems.append(f"review is for {review.get('sha', '?')[:10]}, head is {head[:10]} — re-run review")
+        problems.append((WAIT, f"review is for {review.get('sha', '?')[:10]}, head is {head[:10]} — re-run the review and publish it"))
     if risk.get("sha") != head:
-        problems.append(f"risk tier is for {str(risk.get('sha'))[:10]}, head is {head[:10]} — re-run classification")
+        problems.append((WAIT, f"risk tier is for {str(risk.get('sha'))[:10]}, head is {head[:10]} — re-run the review and publish it"))
     if review.get("blocking"):
         n = sum(1 for f in review["findings"] if f["severity"] == "important")
-        problems.append(f"{n} open Important finding(s) or an incomplete review")
+        problems.append((BLOCK, f"{n} open Important finding(s) or an incomplete review"))
 
     stats = qlib.numstat(args.base)
     floor, _, floor_hit = classify_risk.deterministic(cfg, qlib.changed_files(args.base), stats)
@@ -119,9 +137,9 @@ def main() -> None:
     for note in notes:
         print(f"note: {note}")
     if (problem := depth_problem(tier, review)):
-        problems.append(problem)
+        problems.append((BLOCK, problem))
     if (problem := policy_problem(review, cfg["_path"])):
-        problems.append(problem)
+        problems.append((BLOCK, problem))
     approvers = set()
     for r in gh_list(f"repos/{repo}/pulls/{args.pr}/reviews?per_page=100"):
         user = r.get("user") or {}  # null for deleted accounts
@@ -142,12 +160,14 @@ def main() -> None:
                     and DIRECTOR_RE.search(r.get("body") or "")):
                 approvers.add(f"{author} (director)")
     if len(approvers) < need:
-        problems.append(f"Tier {tier} needs {need} human approval(s) on {head[:10]}; have {len(approvers)}"
-                        + (f": {', '.join(sorted(approvers))}" if approvers else ""))
+        problems.append((WAIT, f"Tier {tier} needs {need} human approval(s) on {head[:10]}; have {len(approvers)}"
+                               + (f": {', '.join(sorted(approvers))}" if approvers else "")))
 
-    if problems:
-        print("❌ Not mergeable:\n" + "\n".join(f"- {p}" for p in problems))
-        sys.exit(1)
+    code = exit_code(problems)
+    if code:
+        print(("❌ Not mergeable:" if code == 1 else "⏳ Waiting on a human:") + "\n"
+              + "\n".join(f"- {p}" for _, p in problems))
+        sys.exit(code)
     print(f"✅ Tier {tier}: {len(approvers)}/{need} human approval(s), no open blockers, review matches head.")
 
 

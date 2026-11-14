@@ -34,12 +34,12 @@ if git cat-file -e "$BASE:quality.toml" 2>/dev/null; then
   echo "Reviewing under the base branch's policy ($BASE)."
 fi
 if [ -z "$DEPTH" ]; then  # Tier 2 is reviewed deep; approval_gate.py rejects anything less for it
-  FLOOR_TIER="$(python3 "$HERE/classify_risk.py" --base "$BASE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tier"])')"
+  FLOOR_TIER="$(python3 "$HERE/classify_risk.py" --base "$BASE" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["tier"])')"
   [ "$FLOOR_TIER" = "2" ] && DEPTH="--depth deep" && echo "Tier 2 change: deep review (every deep_families member)."
 fi
 STATE="$ROOT/.quality"; mkdir -p "$STATE"; [ -f "$STATE/.gitignore" ] || echo '*' > "$STATE/.gitignore"
 
-cfg() { python3 -c "import sys; sys.path.insert(0,'$HERE'); import qlib; c=qlib.load_config(); print($1)"; }
+cfg() { python3 -I -c "import sys; sys.path.insert(0,'$HERE'); import qlib; c=qlib.load_config(); print($1)"; }
 IMPL="$(cfg 'c["agents"]["implementer"]')"
 MAX_ROUNDS="$(cfg 'c["review"].get("max_rounds",3)')"
 DIFF_ONLY_AFTER="$(cfg 'c["review"].get("diff_only_after_round",2)')"
@@ -92,7 +92,10 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
   gate_until_green || { echo "Gate still red after repairs."; exit 1; }
 
   since=""
-  if [ "$round" -ge "$DIFF_ONLY_AFTER" ] && [ -n "$last_reviewed" ]; then since="--since $last_reviewed"; fi
+  # Delta-only review needs a delta: when the repair round made no commit, review the whole change again.
+  if [ "$round" -ge "$DIFF_ONLY_AFTER" ] && [ -n "$last_reviewed" ] && [ "$last_reviewed" != "$(git rev-parse HEAD)" ]; then
+    since="--since $last_reviewed"
+  fi
   head_sha="$(git rev-parse HEAD)"
   # shellcheck disable=SC2086
   python3 "$HERE/cross_review.py" --base "$BASE" $since $DEPTH --intent "$INTENT"
@@ -105,7 +108,7 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
     python3 "$HERE/evidence_packet.py" --base "$BASE" --rounds "$round" --status converged
     if [ "$(cfg 'c["review"].get("where","ci")')" = "local" ]; then
       echo "Local review mode: a HUMAN publishes the evidence, after this commit is pushed (agents are blocked from it):"
-      echo "  python3 $HERE/evidence_comment.py publish --pr <number>"
+      echo "  python3 $HERE/evidence_comment.py publish --pr <number> --approve"
     fi
     exit 0
   fi

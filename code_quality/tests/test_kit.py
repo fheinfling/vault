@@ -12,12 +12,19 @@ fixture-based eval cases).
 from __future__ import annotations
 
 import json
+import argparse
+import contextlib
+import io
+import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import tomllib
 import unittest
+from unittest import mock
 from pathlib import Path
 
 KIT = Path(__file__).resolve().parent.parent
@@ -561,6 +568,59 @@ class EvidenceHook(unittest.TestCase):
         self.assertEqual(self.run_hook("Edit", kit_edit), 2)                            # otherwise blocked
         self.assertEqual(self.run_hook("Write", {"file_path": "notes.md", "content": marker}, allow_policy_edits=True), 2)
 
+    def test_agents_cannot_post_statuses_or_check_runs(self):
+        for cmd in ["gh api -X POST repos/o/r/statuses/abc -f state=success -f context=x",
+                    "gh api repos/o/r/check-runs -f name=quality-gate -f conclusion=success",
+                    "curl -X POST https://api.github.com/repos/o/r/statuses/abc"]:
+            self.assertEqual(self.run_hook("Bash", {"command": cmd}), 2, cmd)
+        self.assertEqual(self.run_hook("mcp__github__create_commit_status", {"state": "success"}), 2)
+        self.assertEqual(self.run_hook("mcp__github__get_pull_request_status", {"pullNumber": 4}), 0)
+        self.assertEqual(self.run_hook("mcp__claude_ai_Gamma__get_generation_status", {"id": "x"}), 0)
+        self.assertEqual(self.run_hook("mcp__github__create_pull_request_review", {"event": "APPROVE"}), 2)
+
+    def test_mcp_review_and_merge_tools_fail_closed_whatever_the_verb_position(self):
+        # The GitHub MCP server's real tool: verb as a suffix, the approval in an argument.
+        approve = {"method": "create", "event": "APPROVE", "body": "LGTM", "pullNumber": 4}
+        self.assertEqual(self.run_hook("mcp__github__pull_request_review_write", approve), 2)
+        self.assertEqual(self.run_hook("mcp__plugin_github_github__pull_request_review_write", approve), 2)
+        for tool in ["mcp__github__submit_pending_pull_request_review", "mcp__github__pull_request_review_write",
+                     "mcp__github__check_run_create", "mcp__github__commit_status_write", "mcp__x__review"]:
+            self.assertEqual(self.run_hook(tool, {"body": "ok"}), 2, tool)
+        # Verb in an argument, on a tool whose name says nothing about reviews or merges.
+        self.assertEqual(self.run_hook("mcp__x__pull_request_write", {"method": "merge", "pullNumber": 4}), 2)
+        self.assertEqual(self.run_hook("mcp__x__issue_write", {"method": "update", "state": "approved"}), 2)
+        # Reading stays allowed, and so does the word in prose.
+        self.assertEqual(self.run_hook("mcp__github__pull_request_read", {"method": "get_reviews", "pullNumber": 4}), 0)
+        self.assertEqual(self.run_hook("mcp__github__list_pull_request_reviews", {"pullNumber": 4}), 0)
+        self.assertEqual(self.run_hook("mcp__github__add_issue_comment", {"body": "please approve once CI is green"}), 0)
+
+    def test_bash_approvals_in_every_spelling_are_blocked(self):
+        for cmd in ['gh api -X POST "repos/o/r/pulls/$PR/reviews" -f event=APPROVE',
+                    "gh api -X PUT repos/o/r/pulls/4/merge",
+                    "gh api graphql -f query='mutation { addPullRequestReview(input: {pullRequestId: \"x\"}) { clientMutationId } }'",
+                    "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'",
+                    "curl -d '{\"event\": \"APPROVE\"}' https://api.github.com/repos/o/r/pulls/4/reviews"]:
+            self.assertEqual(self.run_hook("Bash", {"command": cmd}), 2, cmd)
+        for cmd in ["gh pr view 4 --json reviews", "git merge --ff-only origin/main"]:
+            self.assertEqual(self.run_hook("Bash", {"command": cmd}), 0, cmd)
+
+    def test_mcp_sensitive_actions_only_allow_read_prefixes(self):
+        for action in ["review_read", "merge_get", "approve_list", "status_search", "check_run_read",
+                       "checkrun_get", "fetch_reviews", "find_reviews", "view_status", "show_reviews",
+                       "describe_check_run", "download_reviews", "pull_request_review_write"]:
+            with self.subTest(action=action):
+                self.assertEqual(self.run_hook(f"mcp__plugin_github_github__{action}", {}), 2)
+        for action in ["get_pull_request_status", "list_reviews", "search_check_runs", "read_review"]:
+            with self.subTest(action=action):
+                self.assertEqual(self.run_hook(f"mcp__github__{action}", {}), 0)
+
+    def test_mcp_approve_event_overrides_even_read_tools(self):
+        for tool in ["mcp__x__perform", "mcp__github__get_pull_request_status"]:
+            for value in ["APPROVE", "approve", "ApPrOvE"]:
+                for args in [{"event": value}, {"input": [{"event": value}]}]:
+                    with self.subTest(tool=tool, args=args):
+                        self.assertEqual(self.run_hook(tool, args), 2)
+
     def test_reading_and_running_the_loop_stay_allowed(self):
         for cmd in ["cat .quality/packet.md", "code_quality/scripts/review_loop.sh --intent x > .quality/loop.out 2>&1",
                     "python3 code_quality/scripts/evidence_comment.py fetch --pr 4 --sha abc", "swift test"]:
@@ -619,19 +679,175 @@ class PolicyBinding(unittest.TestCase):
         wf = (KIT / "ci" / "quality-gate.yml").read_text()
         gate = wf[wf.index("\n  quality-gate:"):]
         staging = gate[gate.index('eval "$TRUSTED_KIT_FN"; trusted_kit'):]
-        check = staging.index("if [ -f _trusted/BOOTSTRAP ]")
-        first_script = staging.index("_trusted/code_quality/scripts/")
+        check = staging.index("if [ -f $RUNNER_TEMP/trusted/BOOTSTRAP ]")
+        first_script = staging.index("$RUNNER_TEMP/trusted/code_quality/scripts/")
         self.assertLess(check, first_script, "the bootstrap check must come before any staged script runs")
         self.assertIn("exit 1", staging[check:first_script])
         # The policy job reads the marker itself, not through a staged (possibly PR-supplied) script.
         policy = wf[wf.index("\n  policy:"):wf.index("\n  checks:")]
-        self.assertIn('if [ -f _trusted/BOOTSTRAP ]; then echo "bootstrap=true"', policy)
+        self.assertIn('if [ -f $RUNNER_TEMP/trusted/BOOTSTRAP ]; then echo "bootstrap=true"', policy)
         self.assertIn("grep -v '^bootstrap='", policy)
 
 
 def qlib_policy(toml: Path, rules: Path) -> str:
     import qlib
     return qlib.policy_fingerprint(toml, rules)
+
+
+class GateHardening(unittest.TestCase):
+    def wf(self):
+        return (KIT / "ci" / "quality-gate.yml").read_text()
+
+    def job(self, name):
+        wf = self.wf(); start = wf.index(f"\n  {name}:")
+        nxt = re.search(r"\n  [a-z-]+:\n", wf[start + 3:])
+        return wf[start: start + 3 + nxt.start()] if nxt else wf[start:]
+
+    def step_script(self, name):
+        step = self.job("quality-gate").split(f"      - name: {name}\n", 1)[1]
+        step = step.split("\n      - ", 1)[0]
+        return textwrap.dedent(step.split("        run: |\n", 1)[1])
+
+    def enforce(self, root, mode):
+        values = {"needs.policy.outputs.review_where": mode, "needs.checks.result": "success",
+                  "needs.review.result": "success", "github.event_name": "pull_request",
+                  "github.event.pull_request.number": "4", "github.event.pull_request.head.sha": "a" * 40}
+        script = re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda m: values[m[1]], self.step_script("Enforce"))
+        # No network or real gate: capture the trusted script invocation and simulate missing approval.
+        stub = 'python3() { printf "%s\\n" "$@" > "$GATE_CALLS"; return 3; }\n'
+        return subprocess.run(["bash", "-e", "-c", stub + script], cwd=root / "checkout",
+                              env={**os.environ, "RUNNER_TEMP": str(root / "runner"), "BASE_REF": "base",
+                                   "EVIDENCE_DIR": str(root / "runner" / "evidence"),
+                                   "GATE_CALLS": str(root / "calls")}, capture_output=True, text=True)
+
+    def test_evidence_acquisition_uses_a_fresh_runner_temp_directory(self):
+        gate = self.job("quality-gate")
+        self.assertNotIn(".quality", gate)
+        self.assertIn('path: "${{ env.EVIDENCE_DIR }}"', gate)
+        self.assertIn('-D "$EVIDENCE_DIR"', gate)
+        self.assertIn('--out "$EVIDENCE_DIR"', gate)
+        with tempfile.TemporaryDirectory(prefix="kit-test-evidence-") as tmp:
+            root = Path(tmp)
+            env = {**os.environ, "RUNNER_TEMP": tmp, "GITHUB_ENV": str(root / "env")}
+            paths = []
+            for _ in range(2):
+                subprocess.run(["bash", "-e", "-c", self.step_script("Fresh evidence directory")],
+                               env=env, check=True, capture_output=True, text=True)
+                path = Path((root / "env").read_text().splitlines()[-1].removeprefix("EVIDENCE_DIR="))
+                self.assertEqual(path.parent, root)
+                self.assertTrue(path.is_dir())
+                self.assertEqual(list(path.iterdir()), [])
+                paths.append(path)
+            self.assertNotEqual(*paths)
+
+    def test_enforce_ignores_planted_workspace_evidence(self):
+        with tempfile.TemporaryDirectory(prefix="kit-test-evidence-") as tmp:
+            root = Path(tmp)
+            planted = root / "checkout" / ".quality"
+            planted.mkdir(parents=True)
+            evidence = root / "runner" / "evidence"
+            evidence.mkdir(parents=True)
+            for name in ["review-head.json", "risk.json"]:
+                (planted / name).write_text('{"blocking": false}')
+            for mode in ["local", "ci"]:
+                with self.subTest(mode=mode):
+                    result = self.enforce(root, mode)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("No review evidence", result.stdout)
+                    self.assertFalse((root / "calls").exists(), "planted evidence must never reach the gate")
+            for name in ["review-head.json", "risk.json"]:
+                (evidence / name).write_text("{}")
+            for mode in ["local", "ci"]:
+                self.enforce(root, mode)
+                args = (root / "calls").read_text().splitlines()
+                self.assertEqual(args[args.index("--risk") + 1], str(evidence / "risk.json"))
+                self.assertEqual(args[args.index("--review") + 1], str(evidence / "review-head.json"))
+
+    def test_waiting_annotation_matches_review_mode(self):
+        with tempfile.TemporaryDirectory(prefix="kit-test-wait-") as tmp:
+            root = Path(tmp)
+            (root / "checkout").mkdir()
+            # Include the old location too, so this catches the message bug independently.
+            for evidence in [root / "runner" / "evidence", root / "checkout" / ".quality"]:
+                evidence.mkdir(parents=True)
+                (evidence / "review-head.json").write_text("{}")
+            local = self.enforce(root, "local")
+            ci = self.enforce(root, "ci")
+            self.assertEqual(local.returncode, 1)
+            self.assertEqual(ci.returncode, 1)
+            self.assertIn("evidence_comment.py publish --pr 4 --approve", local.stdout)
+            self.assertIn("Waiting for your sign-off", ci.stdout)
+            self.assertNotIn("publish", ci.stdout)
+            self.assertIn("Approve", ci.stdout)
+            self.assertIn("head commit", ci.stdout)
+            self.assertIn("/director-approve", ci.stdout)
+
+    def test_no_job_writes_statuses_and_only_review_writes_prs(self):
+        wf = self.wf()
+        self.assertNotIn("statuses", wf)
+        top = wf[wf.index("\npermissions:"):wf.index("\nconcurrency:")]
+        self.assertNotIn("write", top)
+        self.assertIn("pull-requests: write", self.job("review"))
+        for name in ("policy", "checks", "quality-gate"):
+            self.assertNotIn("pull-requests: write", self.job(name), name)
+
+    def test_checks_run_on_review_events_and_gate_every_event(self):
+        self.assertNotIn("if: github.event_name != 'pull_request_review'", self.job("checks"))
+        enforce = self.wf()[self.wf().index("- name: Enforce"):]
+        self.assertIn('if [ "${{ needs.checks.result }}" != "success" ]', enforce)
+        self.assertIn("Review job failed", enforce)
+
+    def test_the_job_is_the_verdict_and_waiting_says_so(self):
+        gate = self.job("quality-gate")
+        self.assertNotIn("GATE_STATE", gate)
+        self.assertIn("Waiting for you (not a failure in the code)", gate)
+        self.assertIn("Waiting for your sign-off (not a failure in the code)", gate)
+        self.assertIn("--approve", gate)
+
+    def test_kit_is_staged_outside_the_checkout(self):
+        wf = self.wf()
+        self.assertNotIn("_trusted", wf)
+        self.assertIn('"$BASE_REF" $RUNNER_TEMP/trusted', wf)
+
+    def test_no_shell_variable_inside_single_quoted_python(self):
+        for line in self.wf().splitlines():
+            for m in re.finditer(r"python3[^']*'([^']*)'", line):
+                self.assertNotIn("$", m.group(1), line)
+
+    def test_inline_python_is_isolated(self):
+        # Inline Python runs with the PR checkout as cwd; without -I a PR-planted tomllib.py or json.py
+        # would be imported instead of the standard library.
+        for path in [KIT / "ci" / "quality-gate.yml", *(KIT / "scripts").glob("*.sh")]:
+            for line in path.read_text().splitlines():
+                if re.search(r"python3 (-c|-)( |$)", line):
+                    self.fail(f"{path.name}: inline python without -I: {line.strip()}")
+
+    def test_staging_refuses_a_prefilled_target(self):
+        with TempRepo() as r:
+            r.write("code_quality/scripts/qlib.py", "# base\n")
+            r.write("code_quality/quality.toml", "version = 1\n")
+            r.commit("base")
+            base = git(r.path, "rev-parse", "HEAD").strip()
+            r.write("_trusted/code_quality/scripts/json.py", "raise SystemExit('planted')\n")
+            r.commit("pr plants a module where the kit is staged")
+            res = subprocess.run(["bash", str(KIT / "scripts" / "trusted_kit.sh"), base, "_trusted"], cwd=r.path,
+                                 capture_output=True, text=True)
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("not empty", res.stderr)
+
+    def test_actions_pinned_and_no_persisted_credentials(self):
+        wf = self.wf()
+        for line in re.findall(r"(?m)^\s*(?:-\s*)?uses: (\S+)", wf):
+            self.assertRegex(line, r"@[0-9a-f]{40}$", line)
+        self.assertEqual(wf.count("actions/checkout@"), wf.count("persist-credentials: false"))
+
+    def test_signoff_is_pinned_to_the_evidenced_commit(self):
+        src = (KIT / "scripts" / "evidence_comment.py").read_text()
+        self.assertIn('f"commit_id={sha}"', src)
+        self.assertNotIn('"gh", "pr", "review"', src)
+
+    def test_loop_never_reviews_an_empty_delta(self):
+        self.assertIn('[ "$last_reviewed" != "$(git rev-parse HEAD)" ]', (KIT / "scripts" / "review_loop.sh").read_text())
 
 
 class CiPolicy(unittest.TestCase):
@@ -712,10 +928,59 @@ class EvidenceComments(unittest.TestCase):
         self.assertIsNone(evidence_comment.select(comments, "c" * 40, humans))
         self.assertIsNone(evidence_comment.select(comments, self.SHA, {"nobody"}))
 
+    def test_sign_off_is_one_the_gate_counts_for_who_you_are(self):
+        cfg = {"risk": {"humans": ["Alice"], "director_counts_as_reviewer": True}}
+        bot_pr = {"user": {"login": "dependabot[bot]"}, "labels": []}
+        own_pr = {"user": {"login": "alice"}, "labels": [{"name": "agent-authored"}]}
+        # Someone else's PR: a real approval (the gate ignores director reviews from non-authors).
+        self.assertEqual(evidence_comment.sign_off("alice", bot_pr, cfg)[0], "APPROVE")
+        # Your own PR: GitHub refuses author approvals, so the director review, which the gate reads.
+        event, body, note = evidence_comment.sign_off("Alice", own_pr, cfg)
+        self.assertEqual(event, "COMMENT")
+        self.assertRegex(body, approval_gate.DIRECTOR_RE)
+        self.assertIsNone(note)
+        # Your own PR, but the gate won't count it: say so instead of failing silently.
+        _, _, note = evidence_comment.sign_off("alice", {**own_pr, "labels": []}, cfg)
+        self.assertIn("agent-authored", note)
+
     def test_inner_sha_must_match_the_marker(self):
         forged = self.comment(self.SHA, "alice", "2026-11-13T10:00:00Z")
         forged["body"] = forged["body"].replace(f'"sha": "{self.SHA}"', f'"sha": "{self.OTHER}"')
         self.assertIsNone(evidence_comment.select([forged], self.SHA, {"alice"}))
+
+    def test_publish_approve_posts_identity_appropriate_review_on_evidenced_commit(self):
+        cfg = {"risk": {"humans": ["Alice"], "director_counts_as_reviewer": True}}
+        with tempfile.TemporaryDirectory(prefix="kit-test-publish-") as tmp:
+            state = Path(tmp)
+            data = self.evidence(self.SHA)
+            (state / "packet.md").write_text("# packet\n")
+            (state / "risk.json").write_text(json.dumps(data["risk"]))
+            (state / f"review-{self.SHA[:12]}.json").write_text(json.dumps(data["review"]))
+            for author, expected in [("alice", "COMMENT"), ("dependabot[bot]", "APPROVE")]:
+                with self.subTest(author=author), contextlib.ExitStack() as stack:
+                    pr = {"head": {"sha": self.SHA}, "user": {"login": author},
+                          "labels": [{"name": "agent-authored"}]}
+                    stack.enter_context(mock.patch.object(evidence_comment.qlib, "state_dir", return_value=state))
+                    stack.enter_context(mock.patch.object(evidence_comment.qlib, "load_config", return_value=cfg))
+                    stack.enter_context(mock.patch.object(evidence_comment, "gh", return_value=pr))
+                    stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                    def sh(*args, **kwargs):
+                        if args == ("git", "rev-parse", "HEAD"):
+                            return self.SHA
+                        if args == ("gh", "api", "user", "-q", ".login"):
+                            return "Alice"
+                        if args[:3] == ("gh", "pr", "comment"):
+                            Path(args[-1]).unlink()  # publish's temporary packet
+                        return ""
+                    calls = stack.enter_context(mock.patch.object(evidence_comment.qlib, "sh", side_effect=sh))
+                    evidence_comment.publish(argparse.Namespace(pr="4", repo="o/r", approve=True))
+                    reviews = [c.args for c in calls.call_args_list if "repos/o/r/pulls/4/reviews" in c.args]
+                    self.assertEqual(len(reviews), 1)
+                    self.assertEqual(reviews[0][:5], ("gh", "api", "-X", "POST", "repos/o/r/pulls/4/reviews"))
+                    self.assertIn(f"commit_id={self.SHA}", reviews[0])
+                    self.assertIn(f"event={expected}", reviews[0])
+                    if expected == "COMMENT":
+                        self.assertIn("body=/director-approve", reviews[0])
 
 
 class ApprovalGateTier(unittest.TestCase):
@@ -759,6 +1024,31 @@ class ApprovalGateTier(unittest.TestCase):
         self.assertEqual(self.gate(lowered, ["quality.toml"]), (2, 2))  # a floor rule hit
         big = [f"Sources/App/f{i}.swift" for i in range(self.cfg["risk"]["t0"]["max_changed_lines"])]
         self.assertEqual(self.gate(lowered, big), (1, 1))  # over the T0 size limit
+
+    def test_gate_rejects_live_head_different_from_checkout_even_with_matching_evidence(self):
+        head = "a" * 40
+        cfg = {"_path": "trusted/quality.toml", "risk": {"humans": [], "approvals": {"t0": 0}}}
+        with tempfile.TemporaryDirectory(prefix="kit-test-head-") as tmp, contextlib.ExitStack() as stack:
+            risk, review = Path(tmp) / "risk.json", Path(tmp) / "review-head.json"
+            risk.write_text(json.dumps({"sha": head, "tier": 0}))
+            review.write_text(json.dumps({"sha": head, "blocking": False}))
+            stack.enter_context(mock.patch.object(sys, "argv", ["approval_gate.py", "--pr", "4", "--repo", "o/r",
+                                                                  "--base", "base", "--risk", str(risk), "--review", str(review)]))
+            stack.enter_context(mock.patch.object(approval_gate.qlib, "load_config", return_value=cfg))
+            stack.enter_context(mock.patch.object(approval_gate, "gh", return_value={"head": {"sha": head}, "user": {"login": "author"}}))
+            stack.enter_context(mock.patch.object(approval_gate, "gh_list", return_value=[]))
+            stack.enter_context(mock.patch.object(approval_gate.qlib, "numstat", return_value={}))
+            stack.enter_context(mock.patch.object(approval_gate.qlib, "changed_files", return_value=[]))
+            stack.enter_context(mock.patch.object(approval_gate.classify_risk, "deterministic", return_value=(0, [], False)))
+            stack.enter_context(mock.patch.object(approval_gate, "policy_problem", return_value=None))
+            output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            with mock.patch.object(approval_gate.qlib, "sh", return_value=head):
+                approval_gate.main()  # control: matching checkout, evidence and live head pass
+            with mock.patch.object(approval_gate.qlib, "sh", return_value="b" * 40):
+                with self.assertRaises(SystemExit) as stopped:
+                    approval_gate.main()
+                self.assertEqual(stopped.exception.code, 1)
+            self.assertIn("checked-out commit", output.getvalue())
 
 
 if __name__ == "__main__":
