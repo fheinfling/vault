@@ -1,5 +1,12 @@
 # vault
 
+> [!CAUTION]
+> **WORK IN PROGRESS – DO NOT USE.**
+> This project is unfinished and not functional. None of the bank connectors work yet, nothing here
+> has been audited, and the design may change without notice. **Never enter real bank credentials,
+> PINs or API keys into this software, and do not rely on it for any financial data.**
+> It is published for transparency only.
+
 A local store for every account, balance, holding and transaction, refreshed by its own connectors, using only routes each provider allows. Native Swift, Apple only for now, with a Foundation-only core so an iOS viewer or a Linux sync engine can come later.
 
 Licensed for noncommercial use only: see [LICENSE.md](LICENSE.md).
