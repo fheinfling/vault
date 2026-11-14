@@ -1,0 +1,15 @@
+{
+  "id": "rule-tenant-scope-safe",
+  "kind": "clean",
+  "intent": "Add the admin-only cross-tenant revenue report. Admins see all tenants by design; the endpoint is behind require_admin.",
+  "fixture": {
+    "base": {
+      "src/admin/__init__.py": "class Forbidden(Exception):\n    pass\n\n\ndef require_admin(user):\n    if not user.is_admin:\n        raise Forbidden(\"admin only\")\n"
+    },
+    "head": {
+      "src/admin/reports.py": "from src.admin import require_admin\n\n\ndef revenue_by_tenant(db, user):\n    \"\"\"Admin-only: cross-tenant by design, guarded by require_admin.\"\"\"\n    require_admin(user)\n    return db.query(\"SELECT tenant_id, SUM(total) AS revenue FROM invoices GROUP BY tenant_id\", ())\n",
+      "tests/test_reports.py": "import pytest\n\nfrom src.admin import Forbidden\nfrom src.admin.reports import revenue_by_tenant\n\n\nclass User:\n    def __init__(self, is_admin):\n        self.is_admin = is_admin\n\n\nclass FakeDb:\n    def query(self, sql, params):\n        return [(\"t1\", 10)]\n\n\ndef test_non_admin_is_refused():\n    with pytest.raises(Forbidden):\n        revenue_by_tenant(FakeDb(), User(False))\n\n\ndef test_admin_sees_all_tenants():\n    assert revenue_by_tenant(FakeDb(), User(True)) == [(\"t1\", 10)]\n"
+    }
+  },
+  "expect": []
+}

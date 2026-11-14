@@ -1,0 +1,22 @@
+# .github/CODEOWNERS — enable "Require review from Code Owners" in the main ruleset.
+#
+# Why this file exists: on `pull_request` events GitHub runs the workflow file from
+# the PR itself, so a PR could rewrite quality-gate.yml to always pass. Code-owner
+# review is enforced by GitHub, not by our workflow, so it closes that hole.
+# Org plans can also add a ruleset "Require workflows to pass" pinned to the
+# default branch for quality-gate.yml.
+#
+# Replace @your-org/quality-owners with at least two humans (these paths are Tier 2).
+
+/.github/workflows/      @your-org/quality-owners
+/.github/CODEOWNERS      @your-org/quality-owners
+/.github/PULL_REQUEST_TEMPLATE.md   @your-org/quality-owners
+/.github/pull_request_template.md   @your-org/quality-owners
+/.github/PULL_REQUEST_TEMPLATE/     @your-org/quality-owners
+/quality.toml            @your-org/quality-owners
+/REVIEW.md               @your-org/quality-owners
+/AGENTS.md               @your-org/quality-owners
+/CLAUDE.md               @your-org/quality-owners
+/.claude/                @your-org/quality-owners
+/.codex/                 @your-org/quality-owners
+/code_quality/           @your-org/quality-owners

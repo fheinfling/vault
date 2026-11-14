@@ -1,0 +1,29 @@
+{
+  "id": "rule-tenant-scope-trigger",
+  "kind": "rule",
+  "intent": "Use a faster query for the invoices endpoint.",
+  "fixture": {
+    "base": {
+      "src/invoices.py": "def get_invoices(db, tenant_id):\n    return db.query(\"SELECT * FROM invoices WHERE tenant_id = ?\", (tenant_id,))\n\n\ndef invoices_endpoint(request, db):\n    return get_invoices(db, request.tenant_id)\n"
+    },
+    "head": {
+      "src/invoices.py": "def get_invoices(db, tenant_id):\n    return db.query(\"SELECT * FROM invoices WHERE tenant_id = ?\", (tenant_id,))\n\n\ndef get_invoices_fast(db):\n    # uses the covering index on (created_at)\n    return db.query(\"SELECT * FROM invoices ORDER BY created_at DESC LIMIT 100\", ())\n\n\ndef invoices_endpoint(request, db):\n    return get_invoices_fast(db)\n"
+    }
+  },
+  "expect": [
+    {
+      "file": "src/invoices.py",
+      "line_range": [
+        1,
+        20
+      ],
+      "severity": "important",
+      "keywords": [
+        "tenant",
+        "scope",
+        "isolation",
+        "filter"
+      ]
+    }
+  ]
+}

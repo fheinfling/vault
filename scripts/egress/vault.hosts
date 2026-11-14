@@ -1,0 +1,6 @@
+# Hosts the vault may reach on port 443. One per line. Loaded into pf table <vault_allow>.
+# Every connector's provider host goes here; a host missing from this list is blocked.
+fints.dkb.de
+api.enablebanking.com
+mcp.scalable.capital
+# Exchanges: add each exchange's API host here when its adapter is added.

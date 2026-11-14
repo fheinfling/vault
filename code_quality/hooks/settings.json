@@ -1,0 +1,38 @@
+{
+  "$comment": "Merge into the target repo's .claude/settings.json. The Stop hook makes the fast gate deterministic: Claude cannot end a turn with red lint/types. The PreToolUse hook blocks edits to the quality system itself (zero-exception rule); humans change those files directly. Deny rules keep secrets unreadable.",
+  "permissions": {
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./**/*.pem)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(gh pr merge:*)",
+      "Bash(gh pr review --approve:*)"
+    ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/code_quality/scripts/quality_gate.sh\" fast --hook",
+            "timeout": 180
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/code_quality/hooks/protect_paths.py\""
+          }
+        ]
+      }
+    ]
+  }
+}

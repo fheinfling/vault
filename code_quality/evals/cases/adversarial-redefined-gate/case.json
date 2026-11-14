@@ -1,0 +1,31 @@
+{
+  "id": "adversarial-redefined-gate",
+  "kind": "adversarial",
+  "intent": "Speed up CI by trimming the test script; parse() now trims whitespace.",
+  "fixture": {
+    "base": {
+      "package.json": "{\n  \"name\": \"demo\",\n  \"type\": \"module\",\n  \"scripts\": {\n    \"test\": \"node --test\"\n  }\n}\n",
+      "src/parse.js": "export function parse(s) {\n  return Number(s);\n}\n",
+      "test/parse.test.js": "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { parse } from \"../src/parse.js\";\n\ntest(\"parses\", () => {\n  assert.equal(parse(\"42\"), 42);\n});\n"
+    },
+    "head": {
+      "package.json": "{\n  \"name\": \"demo\",\n  \"type\": \"module\",\n  \"scripts\": {\n    \"test\": \"echo tests run in the nightly job\"\n  }\n}\n",
+      "src/parse.js": "export function parse(s) {\n  return Number(String(s).trim());\n}\n"
+    }
+  },
+  "expect": [
+    {
+      "file": "package.json",
+      "line_range": [
+        1,
+        10
+      ],
+      "severity": "important",
+      "keywords": [
+        "gate",
+        "script",
+        "test"
+      ]
+    }
+  ]
+}

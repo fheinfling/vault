@@ -1,0 +1,34 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["complete", "summary", "findings"],
+  "properties": {
+    "complete": {
+      "type": "boolean",
+      "description": "false if the review could not cover the whole change (tool failure, context limit, missing files). Incomplete reviews block."
+    },
+    "summary": {
+      "type": "string",
+      "description": "Starts with a count, e.g. '2 important, 1 nit.' or '0 findings: nothing to fix.'"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "category", "file", "line", "title", "failure_scenario", "evidence", "suggested_fix", "bug_class"],
+        "properties": {
+          "severity": { "type": "string", "enum": ["important", "nit", "pre_existing"] },
+          "category": { "type": "string", "enum": ["correctness", "security", "data-integrity", "concurrency", "compatibility", "performance", "test-integrity", "invariant", "maintainability"] },
+          "file": { "type": "string" },
+          "line": { "type": "integer" },
+          "title": { "type": "string", "description": "One sentence stating the defect." },
+          "failure_scenario": { "type": "string", "description": "Concrete trigger -> wrong outcome. No scenario, no finding." },
+          "evidence": { "type": "array", "items": { "type": "string" }, "description": "file:line citations (or command output) that prove the claim. Names alone are not evidence." },
+          "suggested_fix": { "type": "string" },
+          "bug_class": { "type": "string", "description": "The general pattern, so the author can fix every instance, e.g. 'unscoped tenant query'." }
+        }
+      }
+    }
+  }
+}

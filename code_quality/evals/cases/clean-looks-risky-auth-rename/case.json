@@ -1,0 +1,18 @@
+{
+  "id": "clean-looks-risky-auth-rename",
+  "kind": "clean",
+  "intent": "Rename check_token to verify_token for consistency with the rest of the auth module. No behavior change.",
+  "fixture": {
+    "base": {
+      "src/auth/session.py": "import hmac\n\n\ndef check_token(token, secret):\n    return hmac.compare_digest(token, secret)\n",
+      "src/api.py": "from src.auth.session import check_token\n\n\ndef handle(request, secret):\n    if not check_token(request.token, secret):\n        return 401\n    return 200\n",
+      "tests/test_session.py": "from src.auth.session import check_token\n\n\ndef test_accepts_matching_token():\n    assert check_token(\"abc\", \"abc\")\n\n\ndef test_rejects_other_token():\n    assert not check_token(\"abc\", \"abd\")\n"
+    },
+    "head": {
+      "src/auth/session.py": "import hmac\n\n\ndef verify_token(token, secret):\n    return hmac.compare_digest(token, secret)\n",
+      "src/api.py": "from src.auth.session import verify_token\n\n\ndef handle(request, secret):\n    if not verify_token(request.token, secret):\n        return 401\n    return 200\n",
+      "tests/test_session.py": "from src.auth.session import verify_token\n\n\ndef test_accepts_matching_token():\n    assert verify_token(\"abc\", \"abc\")\n\n\ndef test_rejects_other_token():\n    assert not verify_token(\"abc\", \"abd\")\n"
+    }
+  },
+  "expect": []
+}

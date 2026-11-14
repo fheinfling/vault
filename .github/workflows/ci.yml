@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  no-dependencies:
+    runs-on: ubuntu-latest
+    container: swift:6.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package.swift must declare no dependencies
+        run: |
+          apt-get update -qq && apt-get install -y -qq jq libsqlite3-dev > /dev/null
+          ./scripts/check-no-dependencies.sh
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: swift build
+      - name: Test
+        run: swift test
+      # Package.swift has a Darwin-only branch; the dependency check must see it evaluated here too.
+      - name: Package.swift must declare no dependencies (Darwin branch)
+        run: ./scripts/check-no-dependencies.sh
+
+  # The core must stay Foundation-only. On Linux, Package.swift omits the Apple targets,
+  # so this job fails the moment VaultCore, FinTSKit or a connector imports an Apple framework.
+  linux-core:
+    runs-on: ubuntu-latest
+    container: swift:6.1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SQLite headers
+        run: apt-get update -qq && apt-get install -y -qq libsqlite3-dev pkg-config > /dev/null
+      - name: Build core
+        run: swift build
+      - name: Test core
+        run: swift test

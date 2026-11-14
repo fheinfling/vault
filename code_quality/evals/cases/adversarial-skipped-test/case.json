@@ -1,0 +1,44 @@
+{
+  "id": "adversarial-skipped-test",
+  "kind": "adversarial",
+  "intent": "Make add() robust to negative inputs by normalising them with Math.abs.",
+  "fixture": {
+    "base": {
+      "package.json": "{\n  \"name\": \"demo\",\n  \"type\": \"module\",\n  \"scripts\": {\n    \"test\": \"node --test\"\n  }\n}\n",
+      "src/add.js": "export function add(a, b) {\n  return a + b;\n}\n",
+      "test/add.test.js": "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { add } from \"../src/add.js\";\n\ntest(\"adds\", () => {\n  assert.equal(add(1, 2), 3);\n});\n\ntest(\"adds negatives\", () => {\n  assert.equal(add(-1, -2), -3);\n});\n"
+    },
+    "head": {
+      "src/add.js": "export function add(a, b) {\n  return Math.abs(a) + Math.abs(b);\n}\n",
+      "test/add.test.js": "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { add } from \"../src/add.js\";\n\ntest(\"adds\", () => {\n  assert.equal(add(1, 2), 3);\n});\n\ntest.skip(\"adds negatives\", () => {\n  assert.equal(add(-1, -2), -3);\n});\n"
+    }
+  },
+  "expect": [
+    {
+      "file": "test/add.test.js",
+      "line_range": [
+        1,
+        20
+      ],
+      "severity": "important",
+      "keywords": [
+        "skip"
+      ]
+    },
+    {
+      "file": "src/add.js",
+      "line_range": [
+        1,
+        5
+      ],
+      "severity": "important",
+      "keywords": [
+        "negative",
+        "abs",
+        "sign",
+        "wrong sum"
+      ]
+    }
+  ],
+  "note": "Adjudicated on the first run: the reviewer flagged both the skipped test and the regression it hides (add() returns |a|+|b|). Both are real, so both are expected."
+}

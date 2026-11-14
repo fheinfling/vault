@@ -1,0 +1,149 @@
+# quality.toml for the vault repo. Started from the kit's solo profile (code_quality/profiles/solo.toml)
+# and differs from it where marked "vault:" below. In short:
+#   - [risk].approvals.t2 = 1. There is one person. Tier 2 compensates with deep review (both model
+#     families hunt and verify) and execution verification; the sign-off is a forced read of the
+#     evidence packet plus an audit trail, not an independent check.
+#   - [risk].allow_model_t0 = false. The model may not lower anything to Tier 0 (see the note there).
+#   - One vault floor puts all product code, the manifest, the scripts and the ignore rules at Tier 2.
+#   - [checks] are the repo's real build, test and dependency-check commands.
+# Nothing keeps this file in sync with the kit's profiles; kit updates never touch it.
+# Changes to this file are Tier 2 and are reviewed under the policy on the base
+# branch, never under the version the PR proposes.
+
+version = 1
+
+[agents]
+# Who writes the code by default. Review routing (which families hunt, who verifies)
+# is configured in [review] below.
+implementer   = "claude"            # "claude" | "codex"
+claude_model  = "claude-opus-5-5"
+codex_model   = "gpt-6-astra"
+# CLI versions CI installs from npm. Pinned so the reviewer cannot change under you between
+# runs; bump them deliberately and re-run the evals first (this file is Tier 2).
+claude_cli    = "2.1.323"           # @anthropic-ai/claude-code
+codex_cli     = "0.167.0"           # @openai/codex
+
+[checks]
+# Deterministic gates. Commands run from repo root; any non-zero exit fails.
+# fast: run by the Claude Code Stop hook on every turn end (keep < ~60s).
+# full: run before review, in CI, and in the merge queue.
+# Swift has no separate lint/type step: the build is the type check (about 15 s cold, seconds incremental).
+fast = [
+  "swift build",
+]
+# The Linux build of the Foundation-only core runs in .github/workflows/ci.yml, not here.
+full = [
+  "swift build",
+  "swift test",
+  "./scripts/check-no-dependencies.sh",
+]
+
+[review]
+# Which model families hunt and verify at quick/standard depth. One family is the
+# default: Anthropic and OpenAI both review and verify within one family in
+# production, and a fresh same-model session verifies about as well as a cross-model
+# one (Song, Oct 2026). Add "codex" here only if your evals show it catches real bugs
+# Claude misses at acceptable cost (evals/README.md, "conditional catches").
+families       = ["claude"]
+# Families used at deep depth, which CI applies to Tier 2 (and `--depth deep`). The
+# second family is spent where the risk warrants it: mixing families found 56.7% of
+# planted errors vs 42.7% for two same-model reviews (Song, Oct 2026). Set this to
+# ["claude"] if you have no Codex access; Tier 2 then relies on execution verification.
+deep_families  = ["claude", "codex"]
+# Who verifies each finding: "claude", "codex", or "other" (the family that did not
+# find it). Default "claude": in the only published head-to-head (Xiang et al., Jul
+# 2026, older models, no test execution) Claude reviewing Codex helped and Codex
+# reviewing Claude hurt; and a fresh same-model session verifies about as well as a
+# top-tier cross-model one (Song, Oct 2026). This default was chosen by Claude, so
+# confirm it with your own evals. Deep mode always uses every family.
+verifier       = "claude"
+# vault: reviews run locally through the logged-in CLIs; no API keys in CI.
+# The evidence is published to the PR with code_quality/scripts/evidence_comment.py.
+where          = "local"
+# Verifiers run in a throwaway checkout and may execute tests / write reproductions
+# (OpenAI Dec 2025: repo access + execution beats reading the diff; Google Mandiant
+# Aug 2026: validation by running the exploit). Needs a sandboxed environment.
+verify_with_execution = true
+depth          = "standard"   # quick | standard | deep  (deep = every deep_families member hunts and verifies every finding)
+max_rounds     = 3            # review→fix rounds before the loop stops and escalates to a human
+max_nits       = 3            # nits shown per review; the rest are dropped
+diff_only_after_round = 2     # from this round on, re-review only the delta since the last reviewed SHA
+# Paths the reviewers must not comment on (generated, vendored, lockfiles).
+skip_paths = ["**/*.lock", "**/package-lock.json", "**/pnpm-lock.yaml", "**/dist/**", "**/build/**", "**/vendor/**", "**/generated/**", "**/__snapshots__/**"]
+
+[ci]
+# vault: the CLI and Keychain adapter exist only on Darwin, so the checks job runs on macOS.
+# Swift and jq ship on the runner image; nothing to install.
+runs_on = "macos-15"
+setup   = []
+
+[risk]
+default_tier = 1
+# Human approvals required per tier. Agent approvals never count.
+approvals = { t0 = 0, t1 = 1, t2 = 1 }   # solo: one human; see header
+# Anthropic rule: on an agent-written PR, the human who directed the agent
+# counts as one of the required reviewers (they must still be on `humans`).
+director_counts_as_reviewer = true
+# Organisation-controlled list of human GitHub logins whose approvals count.
+humans = ["fheinfling"]
+# Models may RAISE the tier but never lower it below the deterministic floor.
+# true lets the classifier lower a no-floor change to T0 when it is additive code
+# behind a default-off flag (checklist in agents/risk-classifier.md), within the T0
+# size limit; such merges are marked in risk.json and the packet for the weekly
+# sample. Team default: off until shadow mode shows the classifier's T0 calls match
+# yours (FLOW.md "Earning autonomy"). The solo profile (profiles/solo.toml) turns it on.
+# vault: off. Every product path is Tier 2 by floor, and there are no feature flags yet, so the
+# flag-gated Tier 0 path cannot apply.
+# Turn on only after shadow mode shows the classifier's T0 calls match yours (FLOW.md "Earning autonomy").
+allow_model_t0 = false
+
+# T0 (no human): EVERY changed file must match one of these globs, the diff
+# must be under the line limit, and no floor below may apply.
+# Match by file TYPE, never by directory alone: `docs/server.py` is code.
+[risk.t0]
+paths = ["**/*.md", "**/*.mdx", "**/*.rst", "**/*.txt", "**/*.adoc",
+         "**/locales/**/*.json", "**/locales/**/*.yml", "**/i18n/**/*.json", "**/i18n/**/*.yml"]
+max_changed_lines = 300
+
+# Deterministic floors. The highest matching floor wins.
+[[risk.floor]]
+tier   = 2
+reason = "auth, permissions, sessions, crypto, secrets"
+paths  = ["**/auth/**", "**/authz/**", "**/permissions/**", "**/session*/**", "**/crypto/**", "**/secrets/**", "**/*.pem", "**/.env*"]
+
+[[risk.floor]]
+tier   = 2
+reason = "money: billing, payments, pricing"
+paths  = ["**/billing/**", "**/payment*/**", "**/pricing/**", "**/invoice*/**"]
+
+[[risk.floor]]
+tier   = 2
+reason = "data: migrations and schema"
+paths  = ["**/migrations/**", "**/migrate/**", "**/schema.prisma", "**/*.sql"]
+
+[[risk.floor]]
+tier   = 2
+reason = "the quality system itself (CI, agent rules, hooks, PR template, this policy)"
+paths  = [".github/workflows/**", ".github/CODEOWNERS", ".github/PULL_REQUEST_TEMPLATE.md", ".github/pull_request_template.md", ".github/PULL_REQUEST_TEMPLATE/**", "quality.toml", "AGENTS.md", "CLAUDE.md", "REVIEW.md", ".claude/settings.json", ".claude/hooks/**", ".claude/agents/**", ".codex/**", "code_quality/**"]
+
+[[risk.floor]]
+tier   = 2
+reason = "deploy and infrastructure"
+paths  = ["**/terraform/**", "**/*.tf", "**/k8s/**", "**/helm/**", "Dockerfile", "**/Dockerfile", "**/deploy/**"]
+
+[[risk.floor]]
+tier   = 1
+reason = "prompts and model settings drive product behavior (Markdown here is code)"
+paths  = ["**/prompts/**", "**/*prompt*", "**/system-prompt*", "**/.claude/skills/**", "**/llm/**", "**/agents/**"]
+
+[[risk.floor]]
+tier   = 1
+reason = "dependency changes (supply chain)"
+paths  = ["**/package.json", "**/requirements*.txt", "**/pyproject.toml", "**/go.mod", "**/Cargo.toml", "**/Gemfile"]
+
+# vault-specific floor. This repo holds bank credentials and talks to banks, so every
+# Swift target, the manifest and every script is Tier 2. Only docs and tests stay below.
+[[risk.floor]]
+tier   = 2
+reason = "vault: all product code (Keychain, signing, bank protocols, connectors, ledger, CLI), the zero-dependency manifest, the egress and check scripts, and the ignore rules that keep the database and keys out of git"
+paths  = ["Sources/**", "Package.swift", "scripts/**", ".gitignore", "**/.gitignore", ".gitattributes"]

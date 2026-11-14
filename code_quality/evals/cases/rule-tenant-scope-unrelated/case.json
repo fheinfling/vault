@@ -1,0 +1,16 @@
+{
+  "id": "rule-tenant-scope-unrelated",
+  "kind": "clean",
+  "intent": "Format dates as ISO 8601 in the export.",
+  "fixture": {
+    "base": {
+      "src/format.py": "def format_date(d):\n    return d.strftime(\"%d.%m.%Y\")\n",
+      "tests/test_format.py": "import datetime as dt\n\nfrom src.format import format_date\n\n\ndef test_format_date():\n    assert format_date(dt.date(2026, 11, 13)) == \"13.11.2026\"\n"
+    },
+    "head": {
+      "src/format.py": "def format_date(d):\n    return d.isoformat()\n",
+      "tests/test_format.py": "import datetime as dt\n\nfrom src.format import format_date\n\n\ndef test_format_date():\n    assert format_date(dt.date(2026, 11, 13)) == \"2026-11-13\"\n"
+    }
+  },
+  "expect": []
+}

@@ -1,0 +1,693 @@
+<meta charset="utf-8">
+<title>Review Pipelines Side by Side</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@500;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a review board. Approaches are lanes (rows) with one identity hue each;
+   stages and dimensions are columns. Status glyphs borrow the language of CI check runs. */
+:root {
+  --paper: #f4f6f9;
+  --surface: #ffffff;
+  --ink: #14171d;
+  --muted: #586070;
+  --rule: #d9dee6;
+  --rule-strong: #b9c0cc;
+  --l-anthropic: #9a6300;
+  --l-openai: #0b7468;
+  --l-google: #3b4cc0;
+  --l-people: #94387f;
+  --l-kit: #14171d;
+  --tint: 0.09;
+  --font-display: "Schibsted Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --step--1: 0.8125rem;
+  --step-0: 0.9375rem;
+  --step-1: 1.125rem;
+  --step-2: 1.5rem;
+  --step-3: clamp(1.9rem, 4.5vw, 3rem);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0e1014;
+    --surface: #161920;
+    --ink: #e7eaf0;
+    --muted: #9ba3b2;
+    --rule: #272c35;
+    --rule-strong: #3a414d;
+    --l-anthropic: #e3a43a;
+    --l-openai: #3cc3b0;
+    --l-google: #8f9cff;
+    --l-people: #dc8bc8;
+    --l-kit: #e7eaf0;
+    --tint: 0.14;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0e1014;
+  --surface: #161920;
+  --ink: #e7eaf0;
+  --muted: #9ba3b2;
+  --rule: #272c35;
+  --rule-strong: #3a414d;
+  --l-anthropic: #e3a43a;
+  --l-openai: #3cc3b0;
+  --l-google: #8f9cff;
+  --l-people: #dc8bc8;
+  --l-kit: #e7eaf0;
+  --tint: 0.14;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: var(--step-0);
+  line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.wrap { max-width: 1240px; margin: 0 auto; padding-block: 40px 72px; display: grid; gap: 56px; }
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; letter-spacing: -0.01em; }
+h1 { font-size: var(--step-3); font-weight: 800; line-height: 1.05; }
+h2 { font-size: var(--step-2); font-weight: 700; line-height: 1.2; }
+h3 { font-size: var(--step-1); font-weight: 700; }
+p { margin: 0; max-width: 68ch; }
+a { color: inherit; text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 3px; }
+.eyebrow { font-family: var(--font-mono); font-size: var(--step--1); color: var(--muted); letter-spacing: 0.04em; }
+.muted { color: var(--muted); }
+sup.ref { font-family: var(--font-mono); font-size: 0.68em; line-height: 0; }
+sup.ref a { color: var(--muted); text-decoration: none; }
+sup.ref a:hover { color: var(--ink); text-decoration: underline; }
+section { display: grid; gap: 20px; }
+.section-head { display: grid; gap: 8px; }
+
+/* lane identity */
+[data-lane="anthropic"] { --lane: var(--l-anthropic); }
+[data-lane="openai"] { --lane: var(--l-openai); }
+[data-lane="google"] { --lane: var(--l-google); }
+[data-lane="people"] { --lane: var(--l-people); }
+[data-lane="kit"] { --lane: var(--l-kit); }
+.swatch { width: 10px; height: 10px; border-radius: 2px; background: var(--lane); flex: none; }
+[data-lane="kit"] .swatch { background: repeating-linear-gradient(135deg, var(--lane) 0 2px, transparent 2px 4px); outline: 1.5px solid var(--lane); outline-offset: -1.5px; }
+
+/* header */
+header { display: grid; gap: 16px; }
+.lede { font-size: var(--step-1); color: var(--muted); max-width: 62ch; }
+.checkline { display: flex; flex-wrap: wrap; gap: 8px 20px; font-family: var(--font-mono); font-size: var(--step--1); color: var(--muted); padding-top: 4px; border-top: 1px solid var(--rule); }
+.checkline span::before { content: "✓ "; color: var(--l-openai); }
+
+/* controls */
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--paper); padding-block: 10px; border-bottom: 1px solid var(--rule); }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--paper); }
+.controls .label { font-family: var(--font-mono); font-size: var(--step--1); color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { display: inline-flex; align-items: center; gap: 8px; font: 500 var(--step--1) var(--font-body); color: var(--ink); background: var(--surface); border: 1px solid var(--rule-strong); border-radius: 999px; padding: 5px 12px 5px 10px; cursor: pointer; }
+.chip[aria-pressed="false"] { color: var(--muted); background: transparent; border-style: dashed; }
+.chip[aria-pressed="false"] .swatch { opacity: 0.3; }
+.toggle { display: inline-flex; align-items: center; gap: 8px; font-size: var(--step--1); cursor: pointer; margin-left: auto; }
+.toggle input { accent-color: var(--ink); width: 16px; height: 16px; margin: 0; }
+.hint { font-size: var(--step--1); color: var(--muted); }
+
+/* swimlanes */
+.scroll { overflow-x: auto; border: 1px solid var(--rule); border-radius: 6px; background: var(--surface); }
+.lanes { display: grid; grid-template-columns: 170px repeat(7, minmax(150px, 1fr)); min-width: 1240px; }
+.lanes > div { padding: 12px 14px; border-bottom: 1px solid var(--rule); font-size: var(--step--1); line-height: 1.45; }
+.lanes .stage { font-family: var(--font-mono); font-size: 0.75rem; color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; background: var(--paper); position: relative; }
+.lanes .stage b { display: block; font-family: var(--font-display); text-transform: none; letter-spacing: 0; font-size: var(--step-0); color: var(--ink); }
+.lanes .who { display: flex; align-items: flex-start; gap: 8px; font-weight: 600; font-size: var(--step-0); border-left: 4px solid var(--lane); }
+.lanes .who small { display: block; font-weight: 400; color: var(--muted); font-size: 0.75rem; }
+.yr { display: inline-block; font-family: var(--font-mono); font-size: 0.625rem; font-weight: 500; padding: 0 4px; border-radius: 3px; background: var(--ink); color: var(--surface); margin-right: 4px; vertical-align: 1px; }
+.when { display: block; font-family: var(--font-mono); font-weight: 400; font-size: 0.6875rem; color: var(--muted); margin-top: 2px; }
+thead th .when { margin-left: 17px; }
+.lanes .cell { border-left: 1px solid var(--rule); background: color-mix(in srgb, var(--lane) calc(var(--tint) * 100%), transparent); }
+.lanes .cell.empty { background: transparent; color: var(--muted); font-family: var(--font-mono); }
+.lanes .cell .tag { display: inline-block; font-family: var(--font-mono); font-size: 0.6875rem; padding: 0 5px; border: 1px solid var(--lane); color: var(--ink); border-radius: 3px; margin-bottom: 4px; }
+[hidden] { display: none !important; }
+
+/* matrix */
+table { border-collapse: separate; border-spacing: 0; width: 100%; min-width: 980px; font-size: var(--step--1); }
+th, td { text-align: left; vertical-align: top; padding: 11px 12px; border-bottom: 1px solid var(--rule); }
+thead th { font-weight: 600; font-size: var(--step--1); background: var(--paper); position: sticky; top: 0; }
+thead th .h { display: flex; align-items: center; gap: 7px; }
+tbody th { font-family: var(--font-display); font-weight: 700; font-size: var(--step-0); width: 190px; position: sticky; left: 0; background: var(--surface); z-index: 1; }
+tbody th small { display: block; font-family: var(--font-body); font-weight: 400; color: var(--muted); font-size: 0.75rem; margin-top: 2px; }
+td { border-left: 1px solid var(--rule); }
+td .lv { display: flex; align-items: flex-start; gap: 8px; }
+.glyph { flex: none; width: 13px; height: 13px; border-radius: 50%; border: 2px solid var(--lane); margin-top: 2px; }
+.glyph.full { background: var(--lane); }
+.glyph.partial { background: linear-gradient(90deg, var(--lane) 50%, transparent 50%); }
+.glyph.none { background: transparent; }
+.glyph.na { border-style: dotted; border-color: var(--rule-strong); }
+td.na-cell { color: var(--muted); }
+tr.same td { opacity: 0.45; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: var(--step--1); color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend .glyph { --lane: var(--ink); margin: 0; }
+
+/* spectrum strips */
+.strips { display: grid; gap: 14px; }
+.strip { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 16px 18px 14px; display: grid; gap: 10px; }
+.strip .q { font-family: var(--font-display); font-weight: 700; font-size: var(--step-1); }
+.track { position: relative; height: 92px; margin-inline: 8px; }
+.track::before { content: ""; position: absolute; left: 0; right: 0; top: 40px; height: 2px; background: var(--rule-strong); }
+.ends { display: flex; justify-content: space-between; gap: 16px; font-family: var(--font-mono); font-size: 0.75rem; color: var(--muted); }
+.ends span:last-child { text-align: right; }
+.pin { position: absolute; top: 0; transform: translateX(-50%); display: grid; justify-items: center; gap: 4px; }
+.pin i { width: 14px; height: 14px; border-radius: 50%; background: var(--lane); border: 2px solid var(--surface); box-shadow: 0 0 0 1.5px var(--lane); margin-top: 34px; order: 2; }
+[data-lane="kit"].pin i { background: var(--surface); box-shadow: 0 0 0 2px var(--lane); }
+.pin b { order: 1; font: 600 0.6875rem/1.25 var(--font-mono); color: var(--lane); white-space: nowrap; position: absolute; top: 0; text-align: center; }
+.pin b em { display: block; font-style: normal; font-weight: 400; color: var(--muted); }
+.pin.row-1 b { top: 58px; }
+.pin.row-2 b { top: 88px; }
+.pin.row-3 b { top: 118px; }
+
+/* publication timeline */
+.timeline { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr); gap: 18px; }
+.tl { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 14px 16px 10px; display: grid; gap: 6px; }
+.tl h3 { font-size: var(--step-0); }
+.tl .track { height: 70px; }
+.tl .track::before { top: 40px; }
+.tl .ticks { position: relative; height: 16px; margin-inline: 8px; font-family: var(--font-mono); font-size: 0.6875rem; color: var(--muted); }
+.tl .ticks span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+@media (max-width: 900px) { .timeline { grid-template-columns: 1fr; } }
+.strip .note { font-size: var(--step--1); color: var(--muted); max-width: 90ch; }
+
+/* numbers */
+.numbers { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 18px; }
+.panel { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 18px; display: grid; gap: 14px; align-content: start; }
+.panel h3 { display: flex; align-items: center; gap: 8px; }
+/* charts: plain HTML so text stays full size at every width */
+.chart { display: grid; gap: 16px; }
+.metric { display: grid; gap: 6px; }
+.metric .top { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; font-size: var(--step--1); }
+.metric .top span:last-child { font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.metric .top small { color: var(--muted); font-family: var(--font-mono); }
+.scale { position: relative; height: 14px; background-image: repeating-linear-gradient(90deg, var(--rule) 0 1px, transparent 1px 25%); background-size: calc(100% - 1px) 100%; background-repeat: no-repeat; border-radius: 2px; }
+.scale.bar { height: 12px; }
+.scale .fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--lane); border-radius: 2px; }
+.scale .tick { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--ink); }
+.scale .seg { position: absolute; top: 6px; height: 3px; background: var(--lane); border-radius: 2px; }
+.scale .dot { position: absolute; top: 7px; width: 13px; height: 13px; margin: -6px 0 0 -6px; border-radius: 50%; background: var(--lane); }
+.scale .dot.before { background: var(--surface); border: 2px solid var(--lane); }
+.axis-row { display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: 0.6875rem; color: var(--muted); border-top: 1px solid var(--rule-strong); padding-top: 4px; }
+.chart-key { font-family: var(--font-mono); font-size: 0.6875rem; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; }
+
+/* agree */
+.agree { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0; border-top: 2px solid var(--ink); }
+.agree > div { padding: 14px 16px 16px 0; border-bottom: 1px solid var(--rule); display: grid; gap: 6px; align-content: start; }
+.agree h3 { font-size: var(--step-0); }
+.agree p { font-size: var(--step--1); color: var(--muted); }
+.dots { display: flex; gap: 4px; }
+.dots .swatch { border-radius: 50%; width: 9px; height: 9px; }
+
+footer { border-top: 1px solid var(--rule); padding-top: 18px; display: grid; gap: 10px; font-size: var(--step--1); color: var(--muted); }
+footer ol { margin: 0; padding-left: 0; list-style: none; columns: 2 320px; column-gap: 32px; }
+footer li { break-inside: avoid; padding-block: 2px; font-variant-numeric: tabular-nums; }
+footer li b { font-family: var(--font-mono); font-weight: 500; color: var(--ink); margin-right: 6px; }
+
+@media (max-width: 640px) {
+  .wrap { gap: 44px; padding-block: 28px 56px; }
+  .toggle { margin-left: 0; }
+  .numbers { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">code_quality / docs · comparison</div>
+    <h1>Review Pipelines Side by Side</h1>
+    <p class="lede">How Anthropic, OpenAI, Google and 2026 research say code review and quality assurance should work when agents write most of the code, and how this kit combines their approaches.</p>
+    <div class="checkline"><span>5 approaches</span><span>7 pipeline stages</span><span>13 dimensions</span><span>every cell cited and dated</span><span>sources 2015 – Oct 2026, most from Sep 2025 on</span></div>
+  </header>
+
+  <div class="controls" role="group" aria-label="Choose approaches to compare">
+    <span class="label">compare</span>
+    <div class="chips" id="chips">
+      <button class="chip" type="button" id="chip-anthropic" data-lane="anthropic" aria-pressed="true"><span class="swatch"></span>Anthropic</button>
+      <button class="chip" type="button" id="chip-openai" data-lane="openai" aria-pressed="true"><span class="swatch"></span>OpenAI</button>
+      <button class="chip" type="button" id="chip-google" data-lane="google" aria-pressed="true"><span class="swatch"></span>Google</button>
+      <button class="chip" type="button" id="chip-people" data-lane="people" aria-pressed="true"><span class="swatch"></span>Research</button>
+      <button class="chip" type="button" id="chip-kit" data-lane="kit" aria-pressed="true"><span class="swatch"></span>This kit</button>
+    </div>
+    <label class="toggle" for="diff-only"><input type="checkbox" id="diff-only"> Dim rows where the selected approaches agree</label>
+  </div>
+
+  <section aria-labelledby="h-when">
+    <div class="section-head">
+      <h2 id="h-when">When each source was published</h2>
+      <p class="muted">Google's practices come from a decade of published work. The agent-era sources from OpenAI, Anthropic and practitioners all appeared within twelve months, so the right panel is zoomed in to months.</p>
+    </div>
+    <div class="timeline">
+      <div class="tl"><h3>Foundations, 2015 – 2024</h3><div class="track" id="tl-old"></div><div class="ticks" id="tk-old"></div></div>
+      <div class="tl"><h3>Agent era, Nov 2025 – Nov 2026</h3><div class="track" id="tl-new"></div><div class="ticks" id="tk-new"></div></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-lanes">
+    <div class="section-head">
+      <h2 id="h-lanes">The pipeline, stage by stage</h2>
+      <p class="muted">Each row is one approach, read left to right from "before the PR exists" to "after it ships". A dash means the source doesn't describe that stage. Scroll sideways on small screens.</p>
+    </div>
+    <div class="scroll">
+      <div class="lanes" id="lanes">
+        <div class="stage">approach</div>
+        <div class="stage">1<b>Before the PR</b></div>
+        <div class="stage">2<b>Automated gates</b></div>
+        <div class="stage">3<b>AI review</b></div>
+        <div class="stage">4<b>Checking the findings</b></div>
+        <div class="stage">5<b>Human review</b></div>
+        <div class="stage">6<b>Merge &amp; release</b></div>
+        <div class="stage">7<b>Learning loop</b></div>
+
+        <div class="who" data-lane="anthropic"><span class="swatch"></span><span>Anthropic<small>Claude Code team</small><span class="when">Mar – Oct 2026</span></span></div>
+        <div class="cell" data-lane="anthropic">The agent runs tests, build and lint and shows the output. A fresh-context subagent reviews the diff.<sup class="ref"><a href="#r1">1</a></sup></div>
+        <div class="cell" data-lane="anthropic">Required CI: lint, types, tests on every platform, build, packaging. Red blocks.<sup class="ref"><a href="#r1">1</a></sup></div>
+        <div class="cell" data-lane="anthropic"><span class="tag">parallel</span><br>Several bug-hunting agents read the change against the whole repo and the PR's intent. Depth: Quick, Standard, Deep.<sup class="ref"><a href="#r1">1</a><a href="#r2">,2</a></sup></div>
+        <div class="cell" data-lane="anthropic"><span class="tag">vote</span><br>A separate group of verifiers votes on each finding. Style and cleanup-only findings are dropped. Tags: Important, Nit, Pre-existing.<sup class="ref"><a href="#r1">1</a></sup></div>
+        <div class="cell" data-lane="anthropic"><span class="tag">0 · 1 · 2</span><br>A risk classifier sets how many humans approve. Sensitive paths and CI files always need a person. Agent approvals never count.<sup class="ref"><a href="#r1">1</a></sup></div>
+        <div class="cell" data-lane="anthropic">Merge queue retests on latest main. Ships behind a flag, internal first, then <code>latest</code> → <code>stable</code>.<sup class="ref"><a href="#r1">1</a></sup></div>
+        <div class="cell" data-lane="anthropic">Incident PRs become a daily eval set. Changes to the reviewer are kept only if the score improves.<sup class="ref"><a href="#r1">1</a></sup></div>
+
+        <div class="who" data-lane="openai"><span class="swatch"></span><span>OpenAI<small>Codex review, harness engineering</small><span class="when">Dec 2025 – Jul 2026</span></span></div>
+        <div class="cell" data-lane="openai">Engineers run <code>/review</code> in Codex before pushing. A short AGENTS.md acts as a map into a <code>docs/</code> folder.<sup class="ref"><a href="#r13">13</a><a href="#r12">,12</a></sup></div>
+        <div class="cell" data-lane="openai">"Golden principles" are enforced by custom linters and structural tests. Tests and branch protection are the hard enforcement.<sup class="ref"><a href="#r12">12</a><a href="#r11">,11</a></sup></div>
+        <div class="cell" data-lane="openai"><span class="tag">repo + exec</span><br>Codex reviews every PR with repository access and code execution, which beats diff-only review.<sup class="ref"><a href="#r10">10</a></sup></div>
+        <div class="cell" data-lane="openai"><span class="tag">precision</span><br>One precision-tuned reviewer. OpenAI accepts "modestly reduced recall" for signal and trust.<sup class="ref"><a href="#r10">10</a></sup></div>
+        <div class="cell" data-lane="openai">In the harness experiment, agents reviewed agents and human review was optional. Humans design the environment and state intent.<sup class="ref"><a href="#r12">12</a></sup></div>
+        <div class="cell" data-lane="openai">Minimal blocking merge gates, because corrections are cheap and waiting is expensive.<sup class="ref"><a href="#r12">12</a></sup></div>
+        <div class="cell" data-lane="openai">Each review rule is tested with a trigger, a safe counterexample and an unrelated change. Cleanup and doc-gardening agents run on a schedule.<sup class="ref"><a href="#r11">11</a><a href="#r12">,12</a></sup></div>
+
+        <div class="who" data-lane="google"><span class="swatch"></span><span>Google<small>eng-practices, Cloud CTO office, Mandiant</small><span class="when">2015 – Aug 2026</span></span></div>
+        <div class="cell" data-lane="google"><span class="yr">Apr 26</span>An AI-written "reviewer guide" on every PR: change summary, likely breakage points, risk assessment. Small CLs with tests.<sup class="ref"><a href="#r73">73</a><a href="#r25">,25</a></sup></div>
+        <div class="cell" data-lane="google"><span class="yr">Apr 26</span>Linters, rules and mandatory AI-generated tests as guardrails. "Conditional LGTM": approval only takes effect once tests pass. Presubmits and TAP.<sup class="ref"><a href="#r73">73</a><a href="#r26">,26</a></sup></div>
+        <div class="cell" data-lane="google"><span class="yr">Aug 26</span><span class="tag">specialists</span><br>For security: specialist agents model threats, find entry points, and raise vulnerability hypotheses (Mandiant AVDH).<sup class="ref"><a href="#r74">74</a></sup></div>
+        <div class="cell" data-lane="google"><span class="yr">Aug 26</span><span class="tag">validate + PoC</span><br>Several validation agents assess each hypothesis; a synthesis agent marks it confirmed, disproven or rejected. An expert runs the proof of concept.<sup class="ref"><a href="#r74">74</a></sup></div>
+        <div class="cell" data-lane="google"><span class="yr">Apr 26</span><span class="tag">every change</span><br>"75% of all new code at Google is now AI-generated and approved by engineers." Review focus moves from style to architecture.<sup class="ref"><a href="#r72">72</a><a href="#r73">,73</a></sup></div>
+        <div class="cell" data-lane="google">Trunk-based development at head. TAP finds the culprit, and rollback is fast.<sup class="ref"><a href="#r26">26</a></sup></div>
+        <div class="cell" data-lane="google"><span class="yr">Aug 26</span>A grading agent scores findings against synthetic codebases with expert-verified bugs, averaged over runs.<sup class="ref"><a href="#r74">74</a></sup></div>
+
+        <div class="who" data-lane="people"><span class="swatch"></span><span>Research &amp; practitioners<small>cross-model studies</small><span class="when">Mar – Oct 2026</span></span></div>
+        <div class="cell" data-lane="people">A separate session reviews only the diff, plan, acceptance criteria and test output, so it doesn't inherit the author's assumptions.<sup class="ref"><a href="#r52">52</a></sup></div>
+        <div class="cell empty" data-lane="people">—</div>
+        <div class="cell" data-lane="people"><span class="yr">Oct 26</span><span class="tag">coverage</span><br>One same-model plus one cross-model review found 56.7% of planted errors; two same-model reviews found 42.7%.<sup class="ref"><a href="#r77">77</a></sup></div>
+        <div class="cell" data-lane="people"><span class="yr">Jul 26</span><span class="tag">direction</span><br>Claude reviewing Codex raised pass rates 71.6% → 89.7%; Codex reviewing Claude lowered them 91.4% → 82.8%. A fresh same-model reviewer is about as good as a cross-model one.<sup class="ref"><a href="#r76">76</a><a href="#r77">,77</a></sup></div>
+        <div class="cell" data-lane="people">A human settles the disagreements the models can't.<sup class="ref"><a href="#r51">51</a></sup></div>
+        <div class="cell empty" data-lane="people">—</div>
+        <div class="cell empty" data-lane="people">—</div>
+
+        <div class="who" data-lane="kit"><span class="swatch"></span><span>This kit<small>synthesis, see FLOW.md</small><span class="when">Nov 2026</span></span></div>
+        <div class="cell" data-lane="kit">A Stop hook won't let the agent end a turn with red lint or types. A detector catches weakened tests.</div>
+        <div class="cell" data-lane="kit">The full gate runs with the policy and scripts from the base branch, so a PR can't loosen its own rules.</div>
+        <div class="cell" data-lane="kit"><span class="tag">one hunts; both on T2</span><br>One family hunts in a fresh context by default; Claude and Codex both hunt and verify on Tier 2, where the coverage gain is worth the second model (since 13 Nov 2026).</div>
+        <div class="cell" data-lane="kit"><span class="tag">disprove + run</span><br>A fresh verifier (default Claude; both on Tier 2) tries to disprove each finding and may run tests in a throwaway checkout. A refutation needs evidence.</div>
+        <div class="cell" data-lane="kit"><span class="tag">0 · 1 · 2</span><br>Deterministic path floors set the minimum; the model may only raise the tier. Approvals are pinned to the head commit.</div>
+        <div class="cell" data-lane="kit">Merge queue, then flag → internal → canary, with automatic rollback.</div>
+        <div class="cell" data-lane="kit">Incidents become eval cases. A finding class seen three times becomes a lint rule. Three-round cap.</div>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-matrix">
+    <div class="section-head">
+      <h2 id="h-matrix">Thirteen dimensions</h2>
+      <p class="muted">Pick two approaches with the chips above and turn on the dimming to see only where they differ. The glyph shows how strongly the source commits to the practice.</p>
+      <div class="legend">
+        <span><i class="glyph full"></i>core practice</span>
+        <span><i class="glyph partial"></i>partly / in some cases</span>
+        <span><i class="glyph none"></i>explicitly not done</span>
+        <span><i class="glyph na"></i>not described in the source</span>
+      </div>
+    </div>
+    <div class="scroll">
+      <table id="matrix">
+        <thead>
+          <tr>
+            <th scope="col">Dimension</th>
+            <th scope="col" data-lane="anthropic"><span class="h"><span class="swatch"></span>Anthropic</span><span class="when">Mar – Oct 2026</span></th>
+            <th scope="col" data-lane="openai"><span class="h"><span class="swatch"></span>OpenAI</span><span class="when">Dec 2025 – Jul 2026</span></th>
+            <th scope="col" data-lane="google"><span class="h"><span class="swatch"></span>Google</span><span class="when">2015 – Aug 2026</span></th>
+            <th scope="col" data-lane="people"><span class="h"><span class="swatch"></span>Research</span><span class="when">Mar – Oct 2026</span></th>
+            <th scope="col" data-lane="kit"><span class="h"><span class="swatch"></span>This kit</span><span class="when">Nov 2026</span></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-spectrum">
+    <div class="section-head">
+      <h2 id="h-spectrum">Where they disagree</h2>
+      <p class="muted">Each strip is one open question. The placement is our reading of the sources, not a measurement.</p>
+    </div>
+    <div class="strips" id="strips"></div>
+  </section>
+
+  <section aria-labelledby="h-numbers">
+    <div class="section-head">
+      <h2 id="h-numbers">What they report</h2>
+      <p class="muted">Numbers as each company published them, drawn on a 0–100% scale. They measure different things and are not comparable across companies.</p>
+    </div>
+    <div class="numbers">
+      <div class="panel" data-lane="anthropic">
+        <h3><span class="swatch"></span>Anthropic: before → after the AI reviewer<sup class="ref"><a href="#r7">7</a><a href="#r1">,1</a></sup></h3>
+        <div class="chart" id="dumbbell" role="img" aria-label="Three Anthropic review metrics before and after the AI reviewer launched"></div>
+        <p class="muted" style="font-size:var(--step--1)">Claude Code repo, June → September 2026: merged PRs more than doubled while the share reverted fell by more than 40%.<sup class="ref"><a href="#r1">1</a></sup> At general availability (15 Oct 2026), reviews take 6–10 minutes, down from about 20 in preview.<sup class="ref"><a href="#r75">75</a></sup></p>
+      </div>
+      <div class="panel" data-lane="people">
+        <h3><span class="swatch"></span>2026 studies: does a second model help?</h3>
+        <div class="chart" id="research" role="img" aria-label="Cross-model review study results"></div>
+      </div>
+      <div class="panel">
+        <h3>OpenAI and Google: single figures</h3>
+        <div class="chart" id="bars" role="img" aria-label="Published OpenAI and Google review metrics"></div>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-agree">
+    <div class="section-head">
+      <h2 id="h-agree">Where they all agree</h2>
+    </div>
+    <div class="agree">
+      <div><div class="dots"><span class="swatch" data-lane="anthropic"></span><span class="swatch" data-lane="openai"></span><span class="swatch" data-lane="google"></span></div><h3>Machines enforce the non-negotiables</h3><p>Hooks, CI, presubmits and branch protection are what actually enforce. Prose rules are for judgment.<sup class="ref"><a href="#r5">5</a><a href="#r11">,11</a><a href="#r26">,26</a></sup></p></div>
+      <div><div class="dots"><span class="swatch" data-lane="anthropic"></span><span class="swatch" data-lane="openai"></span><span class="swatch" data-lane="google"></span></div><h3>Precision over recall</h3><p>A noisy reviewer gets ignored. Filter hard before a human sees anything.<sup class="ref"><a href="#r1">1</a><a href="#r10">,10</a><a href="#r27">,27</a></sup></p></div>
+      <div><div class="dots"><span class="swatch" data-lane="anthropic"></span><span class="swatch" data-lane="openai"></span><span class="swatch" data-lane="google"></span></div><h3>Evidence, not claims</h3><p>Show the test output, cite <code>file:line</code>, make every finding actionable.<sup class="ref"><a href="#r3">3</a><a href="#r11">,11</a><a href="#r28">,28</a></sup></p></div>
+      <div><div class="dots"><span class="swatch" data-lane="anthropic"></span><span class="swatch" data-lane="openai"></span><span class="swatch" data-lane="google"></span></div><h3>Small and reversible</h3><p>Small changes, feature flags, fast rollback.<sup class="ref"><a href="#r1">1</a><a href="#r12">,12</a><a href="#r25">,25</a></sup></p></div>
+      <div><div class="dots"><span class="swatch" data-lane="anthropic"></span><span class="swatch" data-lane="openai"></span><span class="swatch" data-lane="google"></span></div><h3>Fix repeats at the source</h3><p>A recurring review comment becomes a lint rule, an analyzer or an instruction-file line.<sup class="ref"><a href="#r1">1</a><a href="#r12">,12</a><a href="#r27">,27</a></sup></p></div>
+      <div><div class="dots"><span class="swatch" data-lane="anthropic"></span><span class="swatch" data-lane="openai"></span><span class="swatch" data-lane="google"></span></div><h3>Measure the reviewer</h3><p>Evals on known bugs, noise labels, acceptance rates. The reviewer is tested like code.<sup class="ref"><a href="#r1">1</a><a href="#r10">,10</a><a href="#r31">,31</a></sup></p></div>
+    </div>
+  </section>
+
+  <footer>
+    <div>Reference numbers match <a href="../REFERENCES.md">REFERENCES.md</a>. Not affiliated with or endorsed by any organization shown.</div>
+    <ol id="refs"></ol>
+  </footer>
+</div>
+
+<script>
+(function () {
+  var REFS = {
+    1: ["Osmani, Lunt & Wang: How the Claude Code team does code review (15 Oct 2026)", "https://claude.dev/blog/solving-code-review-at-anthropic/"],
+    2: ["Anthropic: Code Review (docs)", "https://code.claude.com/docs/en/code-review"],
+    3: ["Anthropic: Customize Code Review / REVIEW.md", "https://code.claude.com/docs/en/code-review-customize"],
+    5: ["Anthropic: Best practices for Claude Code", "https://code.claude.com/docs/en/best-practices"],
+    7: ["Anthropic: Code Review launch (9 Mar 2026)", "https://claude.com/resources/articles/code-review"],
+    8: ["Anthropic: Using LLMs to secure source code", "https://claude.com/resources/articles/using-llms-to-secure-source-code"],
+    10: ["Trębacz et al. (OpenAI): A practical approach to verifying code at scale (1 Dec 2025)", "https://alignment.openai.com/scaling-code-verification/"],
+    11: ["OpenAI: Custom code review rules for Codex (20 Jul 2026)", "https://developers.openai.com/blog/custom-code-review-rules-for-codex"],
+    12: ["Lopopolo (OpenAI): Harness engineering (11 Feb 2026)", "https://openai.com/index/harness-engineering/"],
+    13: ["OpenAI: How OpenAI uses Codex", "https://openai.com/business/guides-and-resources/how-openai-uses-codex/"],
+    14: ["OpenAI: Monitoring internal coding agents for misalignment", "https://openai.com/index/how-we-monitor-internal-coding-agents-misalignment/"],
+    15: ["OpenAI: AGENTS.md guide", "https://developers.openai.com/codex/guides/agents-md/"],
+    21: ["Google: The standard of code review (eng-practices, 2019)", "https://google.github.io/eng-practices/review/reviewer/standard.html"],
+    23: ["Google: Speed of code reviews", "https://google.github.io/eng-practices/review/reviewer/speed.html"],
+    25: ["Google: Small CLs", "https://google.github.io/eng-practices/review/developer/small-cls.html"],
+    26: ["Winters, Manshreck & Wright: Software Engineering at Google (2020)", "https://abseil.io/resources/swe-book"],
+    27: ["Sadowski et al.: Tricorder (ICSE 2015)", "https://research.google/pubs/archive/43322.pdf"],
+    28: ["Sadowski et al.: Lessons from building static analysis tools at Google", "https://cacm.acm.org/research/lessons-from-building-static-analysis-tools-at-google/"],
+    29: ["Frömmgen & Kharatyan (Google): Resolving code review comments with ML (23 May 2023)", "https://research.google/blog/resolving-code-review-comments-with-ml/"],
+    31: ["Vijayvergiya et al.: AI-assisted assessment of coding practices / AutoCommenter (AIware, Jul 2024)", "https://research.google/pubs/ai-assisted-assessment-of-coding-practices-in-industrial-code-review/"],
+    51: ["Vaughan: Cross-model adversarial review (28 Mar 2026)", "https://codex.danielvaughan.com/2026/03/28/cross-model-adversarial-review/"],
+    52: ["SmartScope: Codex reviewing Codex, independent sessions", "https://smartscope.blog/en/generative-ai/chatgpt/codex-independent-second-pass-review/"],
+    72: ["Pichai (Google): Cloud Next 2026 keynote post (22 Apr 2026)", "https://blog.google/innovation-and-ai/infrastructure-and-cloud/google-cloud/cloud-next-2026-sundar-pichai/"],
+    73: ["Boonstra (Google Cloud CTO office): When AI writes the code, who reviews it? (28 Apr 2026)", "https://cloud.google.com/transform/when-ai-writes-the-code-who-reviews-it-cto-google-cloud"],
+    74: ["Tselevich & Maturi (Google Mandiant): Agentic source code review (18 Aug 2026)", "https://cloud.google.com/blog/topics/threat-intelligence/staying-ahead-of-adversarial-ai-through-agentic-source-code-review"],
+    75: ["Anthropic: Code Review is now generally available (15 Oct 2026)", "https://claude.com/resources/articles/code-review-is-now-generally-available"],
+    76: ["Xiang et al.: Cross-model LLM code review, Claude vs Codex (arXiv, 22 Jul 2026)", "https://arxiv.org/abs/2607.21656"],
+    77: ["Song: When does a second model help? (arXiv, 1 Oct 2026, rev. 6 Oct)", "https://arxiv.org/abs/2610.01471"],
+    71: ["Frömmgen et al. (Google): Resolving code review comments with machine learning (ICSE-SEIP 2024)", "https://research.google/pubs/resolving-code-review-comments-with-machine-learning/"]
+  };
+  var LANES = ["anthropic", "openai", "google", "people", "kit"];
+
+  // [dimension, sub, {lane: [level, text, refs]}]  level: full | partial | none | na
+  var DIMS = [
+    ["Who finds the bugs", "first line of review", {
+      anthropic: ["full", "Parallel bug-hunting agents, then humans by tier", [1]],
+      openai: ["full", "Codex reviewer on every PR", [10]],
+      google: ["partial", "Engineers, with agents for specialist areas such as security (Aug 2026)", [72, 74]],
+      people: ["full", "A second family adds coverage: 56.7% vs 42.7% of planted errors (Oct 2026)", [77]],
+      kit: ["partial", "One family by default; both on Tier 2 (deep)", []]}],
+    ["Findings checked before posting", "a second pass filters false positives", {
+      anthropic: ["full", "Verifier agents vote on each finding", [1]],
+      openai: ["partial", "One reviewer tuned for precision; no separate verify stage described", [10]],
+      google: ["full", "Several validation agents + synthesis; an expert runs the PoC (Aug 2026)", [74]],
+      people: ["partial", "Fresh same-model ≈ cross-model; direction matters (Jul–Oct 2026)", [76, 77]],
+      kit: ["full", "Fresh verifier (default Claude) tries to disprove; may run tests", []]}],
+    ["Humans per change", "approvals required to merge", {
+      anthropic: ["partial", "0, 1 or 2, set by a risk classifier", [1]],
+      openai: ["none", "0 in the harness experiment (agents review agents)", [12]],
+      google: ["full", "Engineers approve all AI code, 75% of new code (Apr 2026)", [72]],
+      people: ["partial", "One, to settle disagreements", [51]],
+      kit: ["partial", "0, 1 or 2 by tier; models may only raise it", []]}],
+    ["Risk-based routing", "different scrutiny for different changes", {
+      anthropic: ["full", "Classifier plus always-human paths", [1]],
+      openai: ["na", "Not described", []],
+      google: ["partial", "OWNERS per directory; global approvers for large-scale changes", [26]],
+      people: ["na", "Not described", []],
+      kit: ["full", "Deterministic path floors plus a raise-only classifier", []]}],
+    ["Style and nits", "what happens to non-bug comments", {
+      anthropic: ["none", "Dropped; at most capped nits", [1, 3]],
+      openai: ["none", "Formatting belongs in CI, not review rules", [11]],
+      google: ["none", "Stop nitpicking style on agent-written code (Apr 2026)", [73]],
+      people: ["na", "Not described", []],
+      kit: ["none", "Dropped; at most 3 nits, never blocking", []]}],
+    ["Evidence required", "what a finding must carry", {
+      anthropic: ["full", "file:line, not a guess from a name", [3]],
+      openai: ["full", "Location, the rule it breaks, priority", [11]],
+      google: ["full", "Actionable, ideally with a suggested fix", [28]],
+      people: ["partial", "Diff, plan, criteria and test output as input", [52]],
+      kit: ["full", "Schema-enforced scenario plus file:line", []]}],
+    ["Precision stance", "how much noise is acceptable", {
+      anthropic: ["full", "Filters A/B tested on their own PRs", [1]],
+      openai: ["full", "“Modestly reduced recall” for trust", [10]],
+      google: ["full", "Under 10% effective false positives", [27]],
+      people: ["na", "Not described", []],
+      kit: ["full", "≤ 5% marked wrong, ≥ 50% lead to a change (2025–26 production numbers)", []]}],
+    ["Repo rule files", "where review guidance lives", {
+      anthropic: ["full", "CLAUDE.md + REVIEW.md on the base branch", [3]],
+      openai: ["full", "AGENTS.md with Code Review Rules", [11, 15]],
+      google: ["partial", "Rules, skills and linters as guardrails (Apr 2026); readability", [73, 26]],
+      people: ["na", "Not described", []],
+      kit: ["full", "AGENTS.md, REVIEW.md, quality.toml", []]}],
+    ["Merge gates", "how strict before merge", {
+      anthropic: ["full", "Required CI, security pass, merge queue", [1]],
+      openai: ["partial", "Minimal blocking gates in the harness experiment", [12]],
+      google: ["full", "Conditional LGTM: approval counts once tests pass (Apr 2026)", [73]],
+      people: ["na", "Not described", []],
+      kit: ["full", "Strict machine gates, light human gates", []]}],
+    ["Release safety", "after the merge", {
+      anthropic: ["full", "Flags, internal first, gradual channels", [1]],
+      openai: ["na", "Not described", []],
+      google: ["full", "Flags, culprit finding, fast rollback", [26]],
+      people: ["na", "Not described", []],
+      kit: ["full", "Flag, canary, automatic rollback", []]}],
+    ["Reviewer is evaluated", "the reviewer gets tested too", {
+      anthropic: ["full", "Daily evals from incidents; keep a change only if the score improves", [1]],
+      openai: ["full", "Human evaluation plus recall on known bugs", [10, 11]],
+      google: ["full", "Grading agent on synthetic codebases (Aug 2026)", [74]],
+      people: ["full", "Planted-error and benchmark studies (Jul–Oct 2026)", [76, 77]],
+      kit: ["full", "Incident, clean, adversarial and rule cases; per-family catches", []]}],
+    ["Convergence limits", "stops endless fix rounds", {
+      anthropic: ["full", "Three rounds, diff-only re-review, no repeats", [1]],
+      openai: ["na", "Not described", []],
+      google: ["partial", "Speed norm: respond within one business day", [23]],
+      people: ["na", "Not described", []],
+      kit: ["full", "Three rounds; delta review; open findings re-verified", []]}],
+    ["Guards against gaming", "agents weakening tests to pass", {
+      anthropic: ["na", "Not described in the review post", []],
+      openai: ["partial", "Watches whether the model games its own checks", [10, 14]],
+      google: ["na", "Not described", []],
+      people: ["na", "Not described", []],
+      kit: ["full", "Detector for skipped tests, removed asserts, suppressions", []]}]
+  ];
+
+  // spectrum: [question, leftLabel, rightLabel, {lane: position 0..100}, note]
+  // [question, left, right, {lane: [position 0..100, date of the source behind it]}, note]
+  var STRIPS = [
+    ["How much human review per change?", "none", "every change",
+      {openai: [6, "Feb 2026"], people: [44, "Mar 2026"], anthropic: [52, "Oct 2026"], kit: [58, "Nov 2026"], google: [94, "Apr 2026"]},
+      "OpenAI's harness experiment let agents review agents. Google still has engineers approve all AI-generated code. Anthropic and this kit route by risk."],
+    ["How strict are the gates before merge?", "minimal: fix after", "strict: block before",
+      {openai: [14, "Feb 2026"], kit: [84, "Nov 2026"], anthropic: [88, "Oct 2026"], google: [92, "Apr 2026"]},
+      "Google's conditional LGTM makes an approval count only once tests pass. Machine checks are cheap and human time isn't, so this kit keeps machine gates strict and human gates light."],
+    ["What should review look for?", "bugs only", "bugs + architecture + design",
+      {anthropic: [10, "Oct 2026"], openai: [16, "Dec 2025"], kit: [30, "Nov 2026"], google: [72, "Apr 2026"]},
+      "Google's CTO office says to stop nitpicking style on agent code and review the architecture. The AI reviewers focus on consequential bugs. This kit blocks on bugs and stated rules, and sends new patterns to Tier 2."],
+    ["How are findings settled?", "one precise pass", "independent verification",
+      {openai: [18, "Dec 2025"], people: [62, "Jul – Oct 2026"], anthropic: [80, "Oct 2026"], google: [90, "Aug 2026"], kit: [95, "Nov 2026"]},
+      "Anthropic votes. Google's security harness uses several validators and then runs the exploit. The 2026 studies find a fresh same-model verifier about as good as a cross-model one. This kit verifies in a fresh session and lets the verifier run code."]
+  ];
+
+  // publication timeline: [lane, short label, ISO date, ref]
+  var PUBS_OLD = [
+    ["google", "Tricorder", "2015-05-16", 27], ["google", "CACM static analysis", "2018-04-01", 28],
+    ["google", "eng-practices", "2019-09-01", 21], ["google", "SWE at Google", "2020-03-01", 26],
+    ["google", "ML fixes blog", "2023-05-23", 29], ["google", "ML fixes paper", "2024-04-14", 71],
+    ["google", "AutoCommenter", "2024-07-15", 31]
+  ];
+  var PUBS_NEW = [
+    ["openai", "Verifying at scale", "2025-12-01", 10], ["openai", "Harness eng.", "2026-02-11", 12],
+    ["anthropic", "Review launch", "2026-03-09", 7], ["people", "Cross-model blog", "2026-03-28", 51],
+    ["google", "75% AI code", "2026-04-22", 72], ["google", "Who reviews it?", "2026-04-28", 73],
+    ["openai", "Review rules", "2026-07-20", 11], ["people", "Claude⇄Codex study", "2026-07-22", 76],
+    ["google", "Mandiant AVDH", "2026-08-18", 74], ["people", "Second-model study", "2026-10-01", 77],
+    ["anthropic", "Team post + GA", "2026-10-15", 1], ["kit", "This kit", "2026-11-08", null]
+  ];
+
+  var NAMES = {anthropic: "Anthropic", openai: "OpenAI", google: "Google", people: "Research", kit: "This kit"};
+
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]; }); }
+  function refLinks(list) {
+    if (!list || !list.length) return "";
+    return '<sup class="ref">' + list.map(function (n, i) { return '<a href="#r' + n + '">' + (i ? "," : "") + n + "</a>"; }).join("") + "</sup>";
+  }
+
+  // matrix
+  var tbody = document.querySelector("#matrix tbody");
+  tbody.innerHTML = DIMS.map(function (d) {
+    return "<tr><th scope=\"row\">" + esc(d[0]) + "<small>" + esc(d[1]) + "</small></th>" + LANES.map(function (l) {
+      var c = d[2][l];
+      return '<td data-lane="' + l + '" data-level="' + c[0] + '"' + (c[0] === "na" ? ' class="na-cell"' : "") + '><span class="lv"><i class="glyph ' + c[0] + '" aria-label="' + c[0] + '"></i><span>' + esc(c[1]) + refLinks(c[2]) + "</span></span></td>";
+    }).join("") + "</tr>";
+  }).join("");
+
+  // spectrum strips
+  document.getElementById("strips").innerHTML = STRIPS.map(function (s) {
+    var entries = Object.keys(s[3]).sort(function (a, b) { return s[3][a][0] - s[3][b][0]; });
+    var pins = entries.map(function (l) {
+      return '<div class="pin" data-lane="' + l + '" style="left:' + s[3][l][0] + '%"><b>' + NAMES[l] + "<em>" + s[3][l][1] + "</em></b><i></i></div>";
+    }).join("");
+    return '<div class="strip"><div class="q">' + esc(s[0]) + '</div><div class="track">' + pins + '</div><div class="ends"><span>← ' + esc(s[1]) + "</span><span>" + esc(s[2]) + ' →</span></div><p class="note">' + esc(s[4]) + "</p></div>";
+  }).join("");
+
+  // publication timeline
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  function drawTimeline(trackId, tickId, pubs, from, to, ticks, fmt) {
+    var t0 = Date.parse(from), t1 = Date.parse(to);
+    function pos(d) { return (Date.parse(d) - t0) / (t1 - t0) * 100; }
+    document.getElementById(trackId).innerHTML = pubs.map(function (p) {
+      var d = new Date(p[2]);
+      return '<div class="pin" data-lane="' + p[0] + '" style="left:' + pos(p[2]).toFixed(2) + '%"><b>' +
+        (p[3] ? '<a href="#r' + p[3] + '" style="color:inherit;text-decoration:none">' + p[1] + "</a>" : p[1]) +
+        "<em>" + fmt(d) + "</em></b><i></i></div>";
+    }).join("");
+    document.getElementById(tickId).innerHTML = ticks.map(function (t) {
+      return '<span style="left:' + pos(t[0]).toFixed(2) + '%">' + t[1] + "</span>";
+    }).join("");
+  }
+  drawTimeline("tl-old", "tk-old", PUBS_OLD, "2014-07-01", "2025-01-01",
+    [["2015-01-01", "2015"], ["2017-01-01", "2017"], ["2019-01-01", "2019"], ["2021-01-01", "2021"], ["2023-01-01", "2023"], ["2024-12-01", "2024"]],
+    function (d) { return MONTHS[d.getUTCMonth()] + " " + d.getUTCFullYear(); });
+  drawTimeline("tl-new", "tk-new", PUBS_NEW, "2025-11-01", "2026-11-30",
+    [["2025-12-01", "Dec 25"], ["2026-02-01", "Feb 26"], ["2026-04-01", "Apr"], ["2026-06-01", "Jun"], ["2026-08-01", "Aug"], ["2026-10-01", "Oct"], ["2026-11-20", "Nov"]],
+    function (d) { return d.getUTCDate() + " " + MONTHS[d.getUTCMonth()] + " " + String(d.getUTCFullYear()).slice(2); });
+
+  // charts (HTML, drawn on one 0-100% scale)
+  var AXIS = '<div class="axis-row"><span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span></div>';
+  function metric(label, sub, value, scaleHtml) {
+    return '<div class="metric"><div class="top"><span>' + label + (sub ? "<br><small>" + sub + "</small>" : "") +
+      "</span><span>" + value + "</span></div>" + scaleHtml + "</div>";
+  }
+  function dumb(a, b) {
+    var lo = Math.min(a, b), hi = Math.max(a, b);
+    return '<div class="scale"><span class="seg" style="left:' + lo + '%;width:' + (hi - lo) + '%"></span>' +
+      '<span class="dot before" style="left:' + a + '%"></span><span class="dot" style="left:' + b + '%"></span></div>';
+  }
+  function bar(v, tick) {
+    return '<div class="scale bar"><span class="fill" style="width:' + v + '%"></span>' +
+      (tick != null ? '<span class="tick" style="left:' + tick + '%"></span>' : "") + "</div>";
+  }
+  document.getElementById("dumbbell").innerHTML =
+    metric("PRs with substantive review comments" + refLinks([7]), "before vs. after the research preview · published 9 Mar 2026", "16% → <b>54%</b>", dumb(16, 54)) +
+    metric("Pass after one review-and-fix round" + refLinks([1]), "internal PRs · published 15 Oct 2026", "65% → <b>78%</b>", dumb(65, 78)) +
+    metric("Need five or more rounds" + refLinks([1]), "internal PRs · published 15 Oct 2026", "8.9% → <b>1.5%</b>", dumb(8.9, 1.5)) +
+    AXIS + '<div class="chart-key"><span>○ before</span><span>● after</span></div>';
+
+  document.getElementById("bars").innerHTML =
+    '<div data-lane="openai" class="chart">' +
+    metric("Required custom findings caught, with rules" + refLinks([11]), "tick = 58.3% without rules · published 20 Jul 2026", "<b>98%</b>", bar(98, 58.3)) +
+    metric("Reviewer comments that led to a code change" + refLinks([10]), "Codex code review · published 1 Dec 2025", "<b>52.7%</b>", bar(52.7)) +
+    "</div>" + '<div data-lane="google" class="chart">' +
+    metric("AutoCommenter useful ratio" + refLinks([31]), "54% plateau → 80% target after suppressing 22 non-actionable best-practice links · rater study Apr 2023, published Jul 2024", "54% → <b>80%</b>", dumb(54, 80)) +
+    metric("Effective false positives allowed per analyzer" + refLinks([27]), "Tricorder admission bar · published May 2015", "<b>&lt; 10%</b>", bar(10)) +
+    metric("New code at Google that is AI-generated and engineer-approved" + refLinks([72]), "tick = 50% in fall 2025 · published 22 Apr 2026", "<b>75%</b>", bar(75, 50)) +
+    metric("All reviewer comments resolved by applying an ML-suggested edit" + refLinks([71]), "in deployment · published 2024 (ICSE-SEIP)", "<b>7.5%</b>", bar(7.5)) +
+    "</div>" + AXIS;
+
+  document.getElementById("research").innerHTML =
+    metric("Codex's code, after Claude reviews it" + refLinks([76]), "pass rate · 116 LiveCodeBench tasks, no test execution · 22 Jul 2026", "71.6% → <b>89.7%</b>", dumb(71.6, 89.7)) +
+    metric("Claude's code, after Codex reviews it" + refLinks([76]), "pass rate · same study · the review made it worse", "91.4% → <b>82.8%</b>", dumb(91.4, 82.8)) +
+    metric("Planted errors found by two review calls" + refLinks([77]), "two same-model reviews → one same-model + one cross-model · 1 Oct 2026", "42.7% → <b>56.7%</b>", dumb(42.7, 56.7)) +
+    AXIS + '<div class="chart-key"><span>○ before / baseline</span><span>● after</span><span>older models (Opus 4.7, GPT-5.5, Gemini 2.5) on benchmarks, not production PRs</span></div>';
+
+  // spectrum labels: stack into rows so names never overlap at any width
+  function layoutPins() {
+    document.querySelectorAll("#strips .track, .timeline .track").forEach(function (track) {
+      var rowsEnd = [-Infinity, -Infinity, -Infinity, -Infinity, -Infinity, -Infinity], used = 0;
+      Array.prototype.slice.call(track.querySelectorAll(".pin")).filter(function (p) { return !p.hidden; })
+        .sort(function (a, b) { return parseFloat(a.style.left) - parseFloat(b.style.left); })
+        .forEach(function (pin) {
+          var label = pin.querySelector("b"), w = label.getBoundingClientRect().width;
+          var center = track.clientWidth * parseFloat(pin.style.left) / 100;
+          var left = center - w / 2 - 6, row = 0;
+          var maxRow = track.closest(".tl") ? 5 : 3;
+          while (row < maxRow && left < rowsEnd[row]) row++;
+          rowsEnd[row] = center + w / 2 + 6;
+          used = Math.max(used, row);
+          label.style.top = (row === 0 ? 0 : 28 + row * 30) + "px";
+        });
+      // row 0 sits above the line; rows 1-3 stack below it, 30px each
+      track.style.height = (used === 0 ? 56 : 92 + (used - 1) * 30) + "px";
+    });
+  }
+  window.addEventListener("resize", layoutPins);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(layoutPins);
+
+  // references
+  document.getElementById("refs").innerHTML = Object.keys(REFS).map(function (n) {
+    return '<li id="r' + n + '"><b>[' + n + "]</b>" + '<a href="' + REFS[n][1] + '" target="_blank" rel="noopener">' + esc(REFS[n][0]) + "</a></li>";
+  }).join("");
+
+  // lane toggles + differences
+  var active = {};
+  LANES.forEach(function (l) { active[l] = true; });
+  var diffBox = document.getElementById("diff-only");
+  function apply() {
+    LANES.forEach(function (l) {
+      document.querySelectorAll('#lanes [data-lane="' + l + '"], #matrix [data-lane="' + l + '"], #strips .pin[data-lane="' + l + '"]').forEach(function (n) { n.hidden = !active[l]; });
+    });
+    var on = LANES.filter(function (l) { return active[l]; });
+    tbody.querySelectorAll("tr").forEach(function (tr) {
+      var levels = on.map(function (l) { return tr.querySelector('td[data-lane="' + l + '"]').getAttribute("data-level"); });
+      var same = levels.every(function (v) { return v === levels[0]; });
+      tr.classList.toggle("same", diffBox.checked && on.length > 1 && same);
+    });
+  }
+  document.querySelectorAll("#chips .chip").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var l = b.getAttribute("data-lane");
+      var count = LANES.filter(function (x) { return active[x]; }).length;
+      if (active[l] && count === 1) return; // keep at least one
+      active[l] = !active[l];
+      b.setAttribute("aria-pressed", String(active[l]));
+      apply();
+      layoutPins();
+    });
+  });
+  diffBox.addEventListener("change", apply);
+  apply();
+  layoutPins();
+})();
+</script>

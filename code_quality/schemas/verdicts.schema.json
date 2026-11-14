@@ -1,0 +1,64 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "complete",
+    "note",
+    "verdicts"
+  ],
+  "properties": {
+    "complete": {
+      "type": "boolean",
+      "description": "false if tools failed or you could not open the cited code. Incomplete verification blocks."
+    },
+    "note": {
+      "type": "string",
+      "description": "What you could not check, or empty."
+    },
+    "verdicts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "verdict",
+          "severity",
+          "reason",
+          "evidence"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "confirmed",
+              "refuted",
+              "unresolved"
+            ]
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "important",
+              "nit",
+              "pre_existing"
+            ],
+            "description": "Verifier's own severity call; may downgrade or upgrade."
+          },
+          "reason": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

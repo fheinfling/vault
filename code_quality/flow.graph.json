@@ -1,0 +1,354 @@
+{
+  "$comment": "Machine-readable version of FLOW.md for agents. Query it with: python3 code_quality/scripts/flow_graph.py (show|next|path|mermaid|validate). Paths in 'refs' and 'command' are relative to the repo root. Keep in sync with FLOW.md; `validate` checks every edge and file reference.",
+  "version": 1,
+  "goal": "Minimum total human minutes per successful change without raising revert or incident rate.",
+  "entry": "task",
+  "nodes": {
+    "task": {
+      "stage": 0,
+      "type": "step",
+      "actor": "implementer",
+      "title": "Task contract",
+      "do": "Write acceptance criteria, non-goals and edge cases at the top of the PR description.",
+      "human": "Only if intent is ambiguous AND a wrong guess is expensive.",
+      "refs": [
+        "code_quality/templates/PULL_REQUEST_TEMPLATE.md",
+        "code_quality/rules/AGENTS.md"
+      ],
+      "next": {
+        "done": "implement"
+      }
+    },
+    "implement": {
+      "stage": 1,
+      "type": "step",
+      "actor": "implementer",
+      "title": "Implement in an isolated worktree",
+      "do": "One coherent change (<~400 lines). Test for every behavior change. Follow existing patterns. Never weaken a check.",
+      "enforced_by": "Stop hook runs fast_gate at every turn end; PreToolUse hook blocks edits to the quality system and PR approvals.",
+      "refs": [
+        "code_quality/rules/AGENTS.md",
+        "code_quality/hooks/settings.json",
+        "code_quality/hooks/protect_paths.py"
+      ],
+      "next": {
+        "done": "fast_gate"
+      }
+    },
+    "fast_gate": {
+      "stage": 1,
+      "type": "gate",
+      "actor": "deterministic",
+      "title": "Fast gate (lint + types)",
+      "command": "code_quality/scripts/quality_gate.sh fast --hook",
+      "exit": {
+        "0": "pass",
+        "2": "fail"
+      },
+      "next": {
+        "pass": "full_gate",
+        "fail": "implement"
+      }
+    },
+    "full_gate": {
+      "stage": 2,
+      "type": "gate",
+      "actor": "deterministic",
+      "title": "Full gate (lint, types, tests, build, test-integrity signals)",
+      "command": "code_quality/scripts/quality_gate.sh full",
+      "max_attempts": 3,
+      "exit": {
+        "0": "pass",
+        "1": "fail"
+      },
+      "refs": [
+        "code_quality/scripts/check_test_integrity.py",
+        "code_quality/quality.toml"
+      ],
+      "next": {
+        "pass": "find",
+        "fail": "implement",
+        "exhausted": "stop_gate_red"
+      }
+    },
+    "find": {
+      "stage": 3,
+      "type": "step",
+      "actor": "families (default claude; deep/T2 adds codex)",
+      "title": "Find: each configured family hunts independently (read-only, fresh context); the second family joins at deep depth / Tier 2",
+      "command": "python3 code_quality/scripts/cross_review.py --base origin/main --intent \"<task>\"",
+      "rules": [
+        "Every finding: failure scenario + file:line evidence + bug class.",
+        "No style. Max 3 nits.",
+        "Zero findings is valid.",
+        "Incomplete review => complete=false."
+      ],
+      "refs": [
+        "code_quality/agents/bug-hunter.md",
+        "code_quality/rules/REVIEW.md",
+        "code_quality/schemas/findings.schema.json"
+      ],
+      "next": {
+        "done": "verify"
+      }
+    },
+    "verify": {
+      "stage": 4,
+      "type": "gate",
+      "actor": "verifier (default claude; deep/T2: every deep family)",
+      "title": "Verify: a fresh session of the configured verifier family (default Claude; deep/T2: every family in deep_families) tries to disprove each finding, in a throwaway checkout where it may run tests",
+      "command": "(same run as find) python3 code_quality/scripts/cross_review.py",
+      "rules": [
+        "Refutation counts only with counter-evidence.",
+        "A failing reproduction is the strongest confirmation; a passing targeted test is strong counter-evidence.",
+        "Unresolved Important stays blocking at worst severity.",
+        "Open findings from earlier rounds are re-verified at HEAD; fixed ones clear automatically."
+      ],
+      "exit": {
+        "0": "clean",
+        "1": "blockers",
+        "2": "incomplete"
+      },
+      "refs": [
+        "code_quality/agents/verifier.md",
+        "code_quality/schemas/verdicts.schema.json",
+        "code_quality/EVIDENCE.md"
+      ],
+      "next": {
+        "clean": "classify",
+        "blockers": "repair",
+        "incomplete": "stop_tooling",
+        "round_cap": "escalate"
+      }
+    },
+    "repair": {
+      "stage": 5,
+      "type": "step",
+      "actor": "implementer",
+      "title": "Repair verified findings",
+      "do": "Fix the whole bug class, or append a code-backed reason to .quality/responses.json. Settle 'unresolved' with a test. Minimal patch, no unrelated cleanup. Commit.",
+      "max_rounds": 3,
+      "command": "code_quality/scripts/review_loop.sh --intent \"<task>\"  (runs full_gate -> find -> verify -> repair automatically)",
+      "refs": [
+        "code_quality/agents/fixer.md",
+        "code_quality/scripts/review_loop.sh"
+      ],
+      "next": {
+        "done": "full_gate"
+      }
+    },
+    "classify": {
+      "stage": 6,
+      "type": "step",
+      "actor": "deterministic+classifier",
+      "title": "Risk tier = max(path floor, model opinion); model may only raise",
+      "command": "python3 code_quality/scripts/classify_risk.py --base origin/main --model",
+      "output": ".quality/risk.json {sha, tier, approvals_required, reasons}",
+      "refs": [
+        "code_quality/agents/risk-classifier.md",
+        "code_quality/quality.toml"
+      ],
+      "next": {
+        "t0": "open_pr",
+        "t1": "open_pr",
+        "t2": "open_pr"
+      }
+    },
+    "open_pr": {
+      "stage": 7,
+      "type": "step",
+      "actor": "implementer",
+      "title": "Evidence packet + PR (label agent-authored)",
+      "command": "python3 code_quality/scripts/evidence_packet.py --base origin/main",
+      "output": ".quality/packet.md",
+      "refs": [
+        "code_quality/templates/PULL_REQUEST_TEMPLATE.md"
+      ],
+      "next": {
+        "done": "ci"
+      }
+    },
+    "ci": {
+      "stage": 7,
+      "type": "gate",
+      "actor": "deterministic",
+      "title": "CI reruns gates + review with policy and scripts from the BASE branch",
+      "refs": [
+        "code_quality/ci/quality-gate.yml",
+        "code_quality/templates/CODEOWNERS"
+      ],
+      "next": {
+        "pass": "approval",
+        "fail": "implement"
+      }
+    },
+    "approval": {
+      "stage": 8,
+      "type": "human_gate",
+      "actor": "human",
+      "title": "Human approvals per tier, on THIS head commit",
+      "approvals": {
+        "t0": 0,
+        "t1": 1,
+        "t2": 2
+      },
+      "command": "python3 code_quality/scripts/approval_gate.py --pr <n> --base <base-sha> --config quality.toml --risk .quality/risk.json --review .quality/review-head.json",
+      "human": "Read .quality/packet.md: right thing to build? pattern worth copying? tier + rollback right? (~5 min T1, ~15 min T2) Solo profile: Tier 2 takes 1 approval (profiles/solo.toml).",
+      "rules": [
+        "Agent approvals never count.",
+        "Only logins in quality.toml [risk].humans count.",
+        "Director counts only via a review on head SHA with '/director-approve' on its own line.",
+        "New commit invalidates approvals."
+      ],
+      "next": {
+        "pass": "merge_queue",
+        "new_commit": "ci",
+        "changes_requested": "implement"
+      }
+    },
+    "merge_queue": {
+      "stage": 9,
+      "type": "gate",
+      "actor": "deterministic",
+      "title": "Merge queue: retest on latest main with the change applied",
+      "next": {
+        "pass": "release",
+        "fail": "implement"
+      }
+    },
+    "release": {
+      "stage": 10,
+      "type": "step",
+      "actor": "release_controller",
+      "title": "Flag off by default -> internal -> canary -> everyone",
+      "next": {
+        "healthy": "done",
+        "slo_breach": "rollback"
+      }
+    },
+    "rollback": {
+      "stage": 10,
+      "type": "step",
+      "actor": "release_controller",
+      "title": "Flip flag / revert automatically",
+      "next": {
+        "done": "learn"
+      }
+    },
+    "learn": {
+      "stage": 11,
+      "type": "step",
+      "actor": "agent+human",
+      "title": "Revert/incident -> reviewer eval case; repeated finding class (3x) -> lint rule / AGENTS.md line",
+      "human": "Confirm the expected finding of a new eval case once (~10 min).",
+      "command": "python3 code_quality/evals/run_evals.py code_quality/evals/cases",
+      "refs": [
+        "code_quality/evals/README.md"
+      ],
+      "next": {
+        "done": "done"
+      }
+    },
+    "escalate": {
+      "type": "human_gate",
+      "actor": "human",
+      "title": "Round cap hit: step back, is the approach right?",
+      "human": "Read .quality/packet.md (escalated). Decide: new approach, narrower scope, or accept risk with T2.",
+      "next": {
+        "rethink": "task"
+      }
+    },
+    "stop_gate_red": {
+      "type": "terminal",
+      "title": "Gate still red after 3 repair attempts",
+      "human": "Look at the gate logs in .quality/gate-*.log."
+    },
+    "stop_tooling": {
+      "type": "terminal",
+      "title": "Review incomplete: a reviewer/verifier failed (credits, sandbox, CLI). Blocks merge; not a code problem.",
+      "human": "Fix tooling (e.g. QUALITY_CODEX_SANDBOX=outer inside a sandbox) and re-run."
+    },
+    "done": {
+      "type": "terminal",
+      "title": "Merged and healthy"
+    }
+  },
+  "review_loop_exit_codes": {
+    "0": "converged -> classify (packet ready)",
+    "1": "full_gate never went green -> stop_gate_red",
+    "2": "review incomplete -> stop_tooling",
+    "3": "round cap hit -> escalate"
+  },
+  "tiers": {
+    "t0": {
+      "approvals": 0,
+      "depth": "standard",
+      "examples": "docs, copy, comments, locale strings (file types only, never directories); with allow_model_t0: additive code behind a default-off flag (classifier checklist, size-capped, sampled weekly)"
+    },
+    "t1": {
+      "approvals": 1,
+      "depth": "standard",
+      "examples": "ordinary product/behavior changes, caching/retries/concurrency, dependencies, prompts/model settings"
+    },
+    "t2": {
+      "approvals": 2,
+      "approvals_solo": 1,
+      "depth": "deep",
+      "examples": "auth, secrets, payments, migrations, infra/deploy, CI, the quality system, new patterns"
+    },
+    "rules": [
+      "The change sets the tier, not the author.",
+      "Path floors are deterministic; the classifier can only raise.",
+      "Policy is read from the base branch.",
+      "needs_human_regardless=true lifts T0 to T1.",
+      "Solo profile (profiles/solo.toml): Tier 2 takes 1 approval, compensated by deep review with both families."
+    ]
+  },
+  "invariants": [
+    {
+      "rule": "Lint/types green before a turn ends",
+      "enforced_by": "Stop hook",
+      "ref": "code_quality/hooks/settings.json"
+    },
+    {
+      "rule": "Agents don't edit CI, hooks, rules, or policy",
+      "enforced_by": "PreToolUse hook + CODEOWNERS",
+      "ref": "code_quality/hooks/protect_paths.py"
+    },
+    {
+      "rule": "Agents never approve or merge",
+      "enforced_by": "PreToolUse hook + approval_gate humans allowlist",
+      "ref": "code_quality/scripts/approval_gate.py"
+    },
+    {
+      "rule": "No weakened checks without a verified justification",
+      "enforced_by": "check_test_integrity.py -> verifier",
+      "ref": "code_quality/scripts/check_test_integrity.py"
+    },
+    {
+      "rule": "Incomplete review blocks",
+      "enforced_by": "cross_review.py exit 2 + approval_gate",
+      "ref": "code_quality/scripts/cross_review.py"
+    },
+    {
+      "rule": "Evidence and approvals are bound to the head SHA",
+      "enforced_by": "approval_gate.py",
+      "ref": "code_quality/scripts/approval_gate.py"
+    },
+    {
+      "rule": "PR cannot change its own policy, prompts, or gate",
+      "enforced_by": "CI loads kit from base SHA; CODEOWNERS on workflows",
+      "ref": "code_quality/ci/quality-gate.yml"
+    }
+  ],
+  "human_touchpoints": [
+    "task (only if ambiguous)",
+    "approval (T1/T2)",
+    "escalate",
+    "stop_gate_red",
+    "stop_tooling",
+    "learn (confirm eval case)",
+    "weekly audit: 5 T0 merges + noise report (15 min)",
+    "changes to the quality system (always T2)"
+  ]
+}

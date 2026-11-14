@@ -1,0 +1,10 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tier", "reasons", "needs_human_regardless"],
+  "properties": {
+    "tier": { "type": "integer", "enum": [0, 1, 2] },
+    "reasons": { "type": "array", "items": { "type": "string" } },
+    "needs_human_regardless": { "type": "boolean", "description": "Second question: does this change need a person no matter the tier (sets a pattern, irreversible, product decision)?" }
+  }
+}

@@ -1,0 +1,14 @@
+.build/
+.swiftpm/
+*.xcodeproj
+*.xcworkspace
+DerivedData/
+.DS_Store
+# never commit data or secrets
+*.db
+*.db-wal
+*.db-shm
+*.pem
+*.key
+imports/
+.quality/
