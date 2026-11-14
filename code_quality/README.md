@@ -94,8 +94,9 @@ Then:
 3. **Make CLAUDE.md specific.** Add the single-test command, misleading
    patterns, and decisions not in the code. Keep it short.
 4. **GitHub settings.**
-   - Ruleset on `main`: require PRs, require the `checks` and `quality-gate`
-     status checks, dismiss stale approvals on push, require the merge queue,
+   - Ruleset on `main`: require PRs, require the `checks` check and the
+     `quality-gate / approval` commit status (pending while waiting on you, failure only
+     when blocked), dismiss stale approvals on push, require the merge queue,
      **require review from Code Owners**, and no bypass for bots or apps.
    - Copy `templates/CODEOWNERS` to `.github/CODEOWNERS`. On `pull_request`,
      GitHub runs the workflow *from the PR*, so without code-owner review a PR
@@ -152,7 +153,8 @@ reviewers should run on a developer's machine through the logged-in `claude` and
 `codex` CLIs instead of in CI. The loop runs as above; after pushing the head
 commit, `python3 code_quality/scripts/evidence_comment.py publish --pr <n>` posts
 the packet plus the machine-readable evidence to the PR. CI then runs only the
-deterministic `checks`, and `quality-gate` takes the evidence from that comment,
+deterministic `checks`, and `quality-gate` takes the evidence from that comment
+(`publish --approve` also submits your sign-off, so it is one command),
 accepting it only from a human in `[risk].humans` and only for the head commit.
 No comment, no merge. What you give up: the review no longer runs in a neutral
 environment, so the sign-off rests on the publisher's machine and judgment.

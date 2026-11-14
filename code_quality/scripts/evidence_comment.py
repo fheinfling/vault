@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Carry local review evidence to the PR, and back. For [review].where = "local".
 
-  evidence_comment.py publish --pr N [--repo owner/name]
+  evidence_comment.py publish --pr N [--approve] [--repo owner/name]
       Posts .quality/packet.md plus the machine-readable risk.json and review-<head>.json as one
       PR comment. Run it after review_loop.sh converged, from the same checkout, with the head
-      commit already pushed.
+      commit already pushed. --approve also submits your `/director-approve` review on that
+      commit, so one command is the whole human step.
 
   evidence_comment.py fetch --pr N --sha <head> [--repo owner/name] [--config quality.toml] [--out .quality]
       CI: finds the newest evidence comment for that head commit, posted by a human listed in
       [risk].humans, and writes risk.json and review-head.json for approval_gate.py.
-      No such comment: exit 1. The gate fails closed.
+      No such comment: exit 3 ("waiting"), nothing written. The gate stays closed.
 
 Trust: only comments by a human from [risk].humans count; bots and other accounts are ignored.
 The evidence itself was produced by the loop on that person's machine, so local mode rests on
@@ -113,17 +114,23 @@ def publish(args: argparse.Namespace) -> None:
         fh.write(body)
     qlib.sh("gh", "pr", "comment", str(args.pr), "--repo", repo, "--body-file", fh.name)
     print(f"evidence for {sha[:10]} published to {repo}#{args.pr}")
-    # The workflow has no comment trigger, and a PR needing no approval gets no review event, so
-    # re-run the failed jobs of this head's latest run; quality-gate then reads the new comment.
+    if args.approve:
+        # Your sign-off on exactly this commit. The review event re-runs the gate by itself.
+        qlib.sh("gh", "pr", "review", str(args.pr), "--repo", repo, "--comment", "--body", "/director-approve")
+        print(f"/director-approve submitted on {sha[:10]}; the gate re-runs on the review event")
+        return
+    # The workflow has no comment trigger, so re-run this head's latest quality-gate job by hand;
+    # it then reads the new comment.
     run = qlib.sh("gh", "run", "list", "--repo", repo, "--workflow", "quality-gate.yml", "--commit", sha,
-                  "--event", "pull_request", "--limit", "1", "--json", "databaseId,status,conclusion",
-                  "-q", '.[0] | select(.status == "completed" and .conclusion == "failure") | .databaseId',
-                  check=False).strip()
-    if run:
-        qlib.sh("gh", "run", "rerun", run, "--repo", repo, "--failed", check=False)
-        print(f"re-running the failed jobs of quality-gate run {run}")
+                  "--event", "pull_request", "--limit", "1", "--json", "databaseId,status",
+                  "-q", '.[0] | select(.status == "completed") | .databaseId', check=False).strip()
+    job = run and qlib.sh("gh", "run", "view", run, "--repo", repo, "--json", "jobs",
+                          "-q", '.jobs[] | select(.name == "quality-gate") | .databaseId', check=False).strip()
+    if job:
+        qlib.sh("gh", "run", "rerun", run, "--repo", repo, "--job", job, check=False)
+        print(f"re-running the quality-gate job of run {run}")
     else:
-        print("no failed quality-gate run for this head to re-run; if the gate is still red, re-run it once")
+        print("no finished quality-gate run for this head yet; it will read the comment when it runs")
 
 
 def fetch(args: argparse.Namespace) -> None:
@@ -135,9 +142,9 @@ def fetch(args: argparse.Namespace) -> None:
     comments = gh_list(f"repos/{repo}/issues/{args.pr}/comments?per_page=100")
     data = select(comments, args.sha, humans)
     if data is None:
-        print(f"❌ No evidence comment for {args.sha[:10]} by a human in [risk].humans. "
-              "Run review_loop.sh locally on that commit, then evidence_comment.py publish.")
-        sys.exit(1)
+        print(f"⏳ No evidence comment for {args.sha[:10]} by a human in [risk].humans yet. "
+              "Run review_loop.sh locally on that commit, then evidence_comment.py publish --approve.")
+        sys.exit(3)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     qlib.write_json(out / "risk.json", data["risk"])
@@ -150,6 +157,7 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("publish")
     p.add_argument("--pr", required=True)
+    p.add_argument("--approve", action="store_true", help="also submit your /director-approve review on the head commit")
     p.add_argument("--repo")
     f = sub.add_parser("fetch")
     f.add_argument("--pr", required=True)

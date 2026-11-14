@@ -634,6 +634,32 @@ def qlib_policy(toml: Path, rules: Path) -> str:
     return qlib.policy_fingerprint(toml, rules)
 
 
+class GateStatus(unittest.TestCase):
+    def test_waiting_is_not_blocking(self):
+        import approval_gate as ag
+        self.assertEqual(ag.exit_code([]), 0)
+        self.assertEqual(ag.exit_code([(ag.WAIT, "needs 1 approval")]), 3)
+        self.assertEqual(ag.exit_code([(ag.WAIT, "needs 1 approval"), (ag.BLOCK, "open finding")]), 1)
+
+    def test_workflow_reports_a_required_status_and_fails_only_when_blocked(self):
+        wf = (KIT / "ci" / "quality-gate.yml").read_text()
+        self.assertIn("statuses: write", wf)
+        self.assertGreaterEqual(wf.count('context="quality-gate / approval"'), 2)  # PRs and merge queue
+        self.assertIn('[ "$STATE" != failure ]', wf)
+        self.assertIn("|| [ $? -eq 3 ]", wf)  # missing evidence is "waiting", not a crash
+        report = wf[wf.index("Report `quality-gate / approval`"):]
+        self.assertIn('STATE="${GATE_STATE:-failure}"', report)  # unknown outcome fails closed
+        self.assertIn("if: always()", report[:200])
+        gate = wf[wf.index("\n  quality-gate:"):]
+        boot = gate[gate.index("if [ -f _trusted/BOOTSTRAP ]; then"):]
+        self.assertIn("GATE_STATE=failure", boot[:300])
+
+    def test_publish_can_sign_off_in_one_step(self):
+        src = (KIT / "scripts" / "evidence_comment.py").read_text()
+        self.assertIn('"--approve"', src)
+        self.assertIn('"/director-approve"', src)
+
+
 class CiPolicy(unittest.TestCase):
     def test_defaults_and_overrides(self):
         d = Path(tempfile.mkdtemp(prefix="kit-test-ci-"))

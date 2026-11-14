@@ -105,7 +105,7 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
     python3 "$HERE/evidence_packet.py" --base "$BASE" --rounds "$round" --status converged
     if [ "$(cfg 'c["review"].get("where","ci")')" = "local" ]; then
       echo "Local review mode: a HUMAN publishes the evidence, after this commit is pushed (agents are blocked from it):"
-      echo "  python3 $HERE/evidence_comment.py publish --pr <number>"
+      echo "  python3 $HERE/evidence_comment.py publish --pr <number> --approve"
     fi
     exit 0
   fi
