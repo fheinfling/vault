@@ -214,7 +214,23 @@ jobs:
         if: github.event_name != 'merge_group'
         env: { GH_TOKEN: "${{ github.token }}" }
         run: |
-          : "${EVIDENCE_DIR:?Missing evidence directory}"
+          set -euo pipefail
+          status=0
+          item() {
+            local kind="$1" title="$2" message="$3" mark icon
+            case "$kind" in
+              ok) mark=x; icon=✅ ;;
+              info) mark=x; icon=ℹ️ ;;
+              failure) mark=' '; icon=❌; status=1 ;;
+              waiting) mark=' '; icon=⏳; status=1 ;;
+              *) exit 1 ;;
+            esac
+            printf -- '- [%s] %s %s: %s\n' "$mark" "$icon" "$title" "$message" >> "$GITHUB_STEP_SUMMARY"
+            case "$kind" in
+              failure|waiting) echo "::error title=$icon $title::$message" ;;
+              info) echo "::notice title=$icon $title::$message" ;;
+            esac
+          }
           if [ "${{ needs.policy.outputs.review_where }}" = "local" ]; then
             WAIT="Run: python3 code_quality/scripts/evidence_comment.py publish --pr ${{ github.event.pull_request.number }} --approve"
             MISSING="Review it locally, then $WAIT"
@@ -223,26 +239,51 @@ jobs:
             MISSING="Wait for the CI review run to finish, then re-run this job."
           fi
           if [ "${{ needs.checks.result }}" != "success" ]; then   # every event: checks ran in this run
-            echo "::error title=Checks failed::The deterministic checks failed for this commit."; exit 1
+            item failure "Checks failed" "The deterministic checks failed for this commit."
+          else
+            item ok "Deterministic checks" "Passed for this commit."
           fi
-          if [ "${{ needs.policy.outputs.review_where }}" = "ci" ] && [ "${{ github.event_name }}" = "pull_request" ] \
-             && [ "${{ needs.review.result }}" != "success" ]; then
-            echo "::error title=Review job failed::The CI review job ended with '${{ needs.review.result }}'."; exit 1
+          if [ "${{ needs.policy.outputs.review_where }}" = "ci" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
+            if [ "${{ needs.review.result }}" != "success" ]; then
+              item failure "Review job failed" "The CI review job ended with '${{ needs.review.result }}'."
+            else
+              item ok "CI review job" "Passed for this commit."
+            fi
           fi
-          if [ ! -f "$EVIDENCE_DIR/review-head.json" ]; then
-            echo "::error title=⏳ Waiting for you (not a failure in the code)::No review evidence for this commit yet. $MISSING"
-            exit 1
+          # Informational deterministic tier, independent of whether review evidence exists.
+          # Read stdout, never a possibly stale risk file left by an unsuccessful classifier.
+          if risk_json=$(python3 $RUNNER_TEMP/trusted/code_quality/scripts/classify_risk.py --base "$BASE_REF" --config $RUNNER_TEMP/trusted/quality.toml) \
+             && risk_info=$(printf '%s\n' "$risk_json" | python3 -I -c '
+          import json, sys
+          risk = json.load(sys.stdin)
+          tier, approvals = risk["tier"], risk["approvals_required"]
+          if type(tier) is not int or tier not in (0, 1, 2) or type(approvals) is not int or approvals < 0:
+              raise ValueError("Invalid risk tier or approval requirement")
+          print(f"Tier {tier}; trusted policy requires {approvals} human approval(s).")
+          '); then
+            item info "Risk" "$risk_info"
+          else
+            item failure "Risk classification failed" "Could not determine the tier and required approvals; see the log above."
           fi
-          # The tier is re-derived from the base policy (floor = path rules on this diff); the published
-          # risk.json may only raise it, and approvals_required in it is ignored.
-          set +e
-          python3 $RUNNER_TEMP/trusted/code_quality/scripts/approval_gate.py --pr ${{ github.event.pull_request.number }} \
-            --base "$BASE_REF" --config $RUNNER_TEMP/trusted/quality.toml \
-            --risk "$EVIDENCE_DIR/risk.json" --review "$EVIDENCE_DIR/review-head.json"
-          rc=$?
-          set -e
-          case $rc in
-            0) ;;
-            3) echo "::error title=⏳ Waiting for your sign-off (not a failure in the code)::$WAIT"; exit 1 ;;
-            *) exit 1 ;;
-          esac
+          if [ -z "${EVIDENCE_DIR:-}" ]; then
+            item failure "Missing evidence directory" "EVIDENCE_DIR is unset or empty."
+          elif [ ! -f "$EVIDENCE_DIR/review-head.json" ]; then
+            item waiting "Waiting for you (not a failure in the code)" "No review evidence for this commit yet. $MISSING"
+          else
+            item ok "Review evidence" "Present for evaluation."
+            # The tier is re-derived from the base policy (floor = path rules on this diff); the published
+            # risk.json may only raise it, and approvals_required in it is ignored.
+            if python3 $RUNNER_TEMP/trusted/code_quality/scripts/approval_gate.py --pr ${{ github.event.pull_request.number }} \
+              --base "$BASE_REF" --config $RUNNER_TEMP/trusted/quality.toml \
+              --risk "$EVIDENCE_DIR/risk.json" --review "$EVIDENCE_DIR/review-head.json"; then
+              rc=0
+            else
+              rc=$?
+            fi
+            case $rc in
+              0) item ok "Review approved" "Review and required approvals passed." ;;
+              3) item waiting "Waiting for your sign-off (not a failure in the code)" "$WAIT" ;;
+              *) item failure "Review blocked" "review blocked: see the log above" ;;
+            esac
+          fi
+          exit "$status"

@@ -708,17 +708,146 @@ class GateHardening(unittest.TestCase):
         step = step.split("\n      - ", 1)[0]
         return textwrap.dedent(step.split("        run: |\n", 1)[1])
 
-    def enforce(self, root, mode):
-        values = {"needs.policy.outputs.review_where": mode, "needs.checks.result": "success",
-                  "needs.review.result": "success", "github.event_name": "pull_request",
+    def enforce(self, root, mode, *, checks="success", review="success", event="pull_request",
+                gate_rc=3, risk_rc=0, risk_output=None, env_overrides=None):
+        values = {"needs.policy.outputs.review_where": mode, "needs.checks.result": checks,
+                  "needs.review.result": review, "github.event_name": event,
                   "github.event.pull_request.number": "4", "github.event.pull_request.head.sha": "a" * 40}
         script = re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda m: values[m[1]], self.step_script("Enforce"))
-        # No network or real gate: capture the trusted script invocation and simulate missing approval.
-        stub = 'python3() { printf "%s\\n" "$@" > "$GATE_CALLS"; return 3; }\n'
+        # Stub only the external verdicts; execute the real shell and inline JSON parser.
+        stub = r'''
+        python3() {
+          case "$1" in
+            */classify_risk.py)
+              printf '%s\n' "$@" > "$RISK_CALLS"
+              printf '%s\n' "$RISK_OUTPUT"
+              return "$RISK_RC" ;;
+            */approval_gate.py)
+              printf '%s\n' "$@" > "$GATE_CALLS"
+              return "$GATE_RC" ;;
+            *) command python3 "$@" ;;
+          esac
+        }
+        '''
+        (root / "summary").write_text("")
+        env = {**os.environ, "RUNNER_TEMP": str(root / "runner"), "BASE_REF": "base",
+               "EVIDENCE_DIR": str(root / "runner" / "evidence"),
+               "GITHUB_STEP_SUMMARY": str(root / "summary"),
+               "GATE_CALLS": str(root / "calls"), "GATE_RC": str(gate_rc),
+               "RISK_CALLS": str(root / "risk-calls"), "RISK_RC": str(risk_rc),
+               "RISK_OUTPUT": risk_output if risk_output is not None else
+               json.dumps({"tier": 2, "approvals_required": 2})}
+        env.update(env_overrides or {})
+        env = {key: value for key, value in env.items() if value is not None}
         return subprocess.run(["bash", "-e", "-c", stub + script], cwd=root / "checkout",
-                              env={**os.environ, "RUNNER_TEMP": str(root / "runner"), "BASE_REF": "base",
-                                   "EVIDENCE_DIR": str(root / "runner" / "evidence"),
-                                   "GATE_CALLS": str(root / "calls")}, capture_output=True, text=True)
+                              env=env, capture_output=True, text=True)
+
+    def test_enforce_reports_all_problems_in_order_without_early_exit(self):
+        with tempfile.TemporaryDirectory(prefix="kit-test-enforce-") as tmp:
+            root = Path(tmp)
+            (root / "checkout").mkdir()
+            evidence = root / "runner" / "evidence"
+            evidence.mkdir(parents=True)
+            for present in (False, True):
+                with self.subTest(evidence=present):
+                    if present:
+                        (evidence / "review-head.json").write_text("{}")
+                    result = self.enforce(root, "ci", checks="failure", review="failure", gate_rc=1)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    rows = (root / "summary").read_text().splitlines()
+                    self.assertIn("❌ Checks failed", rows[0])
+                    self.assertIn("❌ Review job failed", rows[1])
+                    self.assertIn("ℹ️ Risk: Tier 2; trusted policy requires 2 human approval(s).", rows[2])
+                    if present:
+                        self.assertIn("✅ Review evidence", rows[3])
+                        self.assertIn("❌ Review blocked: review blocked: see the log above", rows[4])
+                        self.assertTrue((root / "calls").exists())
+                    else:
+                        self.assertIn("⏳ Waiting for you", rows[3])
+                        self.assertIn("Wait for the CI review run to finish, then re-run this job.", rows[3])
+                        self.assertFalse((root / "calls").exists())
+                    self.assertEqual(len(rows), 5 if present else 4)
+                    self.assertTrue(all(row.startswith(("- [x] ", "- [ ] ")) for row in rows))
+                    annotations = [line for line in result.stdout.splitlines() if line.startswith("::error")]
+                    self.assertEqual(len(annotations), 3)
+                    self.assertIn("::error title=❌ Checks failed::", annotations[0])
+                    self.assertIn("::error title=❌ Review job failed::", annotations[1])
+                    self.assertTrue(annotations[2].startswith(
+                        "::error title=❌" if present else
+                        "::error title=⏳ Waiting for you (not a failure in the code)::"))
+                    self.assertEqual((root / "risk-calls").read_text().splitlines(), [
+                        str(root / "runner/trusted/code_quality/scripts/classify_risk.py"),
+                        "--base", "base", "--config", str(root / "runner/trusted/quality.toml")])
+
+    def test_enforce_risk_errors_do_not_hide_evidence_or_verdict(self):
+        with tempfile.TemporaryDirectory(prefix="kit-test-enforce-") as tmp:
+            root = Path(tmp)
+            (root / "checkout").mkdir()
+            evidence = root / "runner/evidence"
+            evidence.mkdir(parents=True)
+            for present in (False, True):
+                if present:
+                    (evidence / "review-head.json").write_text("{}")
+                for risk_rc, output in [(1, None), (127, None), (0, "not json"), (0, "{}"),
+                                        (0, '{"tier": 9, "approvals_required": 0}')]:
+                    with self.subTest(present=present, rc=risk_rc, output=output):
+                        result = self.enforce(root, "local", risk_rc=risk_rc, risk_output=output, gate_rc=0)
+                        self.assertEqual(result.returncode, 1, result.stderr)
+                        summary = (root / "summary").read_text()
+                        self.assertIn("❌ Risk classification failed", summary)
+                        self.assertIn("::error title=❌ Risk classification failed::", result.stdout)
+                        self.assertIn("✅ Review approved" if present else "⏳ Waiting for you", summary)
+                        if not present:
+                            self.assertIn("Review it locally, then Run:", summary)
+                            self.assertIn("evidence_comment.py publish --pr 4 --approve", summary)
+
+    def test_enforce_approval_exit_codes_and_applicable_review_job(self):
+        with tempfile.TemporaryDirectory(prefix="kit-test-enforce-") as tmp:
+            root = Path(tmp)
+            (root / "checkout").mkdir()
+            evidence = root / "runner/evidence"
+            evidence.mkdir(parents=True)
+            (evidence / "review-head.json").write_text("{}")
+            for mode, event in [("ci", "pull_request"), ("ci", "pull_request_review"),
+                                ("local", "pull_request"), ("local", "pull_request_review")]:
+                for rc in (0, 3, 1, 2, 127):
+                    with self.subTest(mode=mode, event=event, rc=rc):
+                        review_applies = mode == "ci" and event == "pull_request"
+                        result = self.enforce(root, mode, event=event, gate_rc=rc,
+                                              review="success" if review_applies else "skipped")
+                        self.assertEqual(result.returncode, 0 if rc == 0 else 1, result.stderr)
+                        summary = (root / "summary").read_text()
+                        self.assertIn("✅ Deterministic checks", summary)
+                        self.assertEqual("✅ CI review job" in summary, review_applies)
+                        expected = {0: "✅ Review approved", 3: "⏳ Waiting for your sign-off"}.get(
+                            rc, "❌ Review blocked")
+                        self.assertIn(expected, summary)
+                        self.assertEqual(result.stdout.count("::error"), 0 if rc == 0 else 1)
+                        args = (root / "calls").read_text().splitlines()
+                        self.assertEqual(args, [str(root / "runner/trusted/code_quality/scripts/approval_gate.py"),
+                                               "--pr", "4", "--base", "base", "--config",
+                                               str(root / "runner/trusted/quality.toml"),
+                                               "--risk", str(evidence / "risk.json"),
+                                               "--review", str(evidence / "review-head.json")])
+
+    def test_enforce_fails_closed_on_missing_environment_or_summary_write_error(self):
+        with tempfile.TemporaryDirectory(prefix="kit-test-enforce-") as tmp:
+            root = Path(tmp)
+            (root / "checkout").mkdir()
+            evidence = root / "runner/evidence"
+            evidence.mkdir(parents=True)
+            (evidence / "review-head.json").write_text("{}")
+            for value in (None, ""):
+                with self.subTest(evidence_dir=value):
+                    result = self.enforce(root, "ci", gate_rc=0, env_overrides={"EVIDENCE_DIR": value})
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn("❌ Missing evidence directory", (root / "summary").read_text())
+                    self.assertIn("::error title=❌ Missing evidence directory::", result.stdout)
+                    self.assertFalse((root / "calls").exists())
+            for value in (None, str(root)):
+                with self.subTest(summary=value):
+                    result = self.enforce(root, "ci", gate_rc=0, env_overrides={"GITHUB_STEP_SUMMARY": value})
+                    self.assertNotEqual(result.returncode, 0)
 
     def test_evidence_acquisition_uses_a_fresh_runner_temp_directory(self):
         gate = self.job("quality-gate")
@@ -793,9 +922,20 @@ class GateHardening(unittest.TestCase):
 
     def test_checks_run_on_review_events_and_gate_every_event(self):
         self.assertNotIn("if: github.event_name != 'pull_request_review'", self.job("checks"))
-        enforce = self.wf()[self.wf().index("- name: Enforce"):]
-        self.assertIn('if [ "${{ needs.checks.result }}" != "success" ]', enforce)
-        self.assertIn("Review job failed", enforce)
+        with tempfile.TemporaryDirectory(prefix="kit-test-enforce-") as tmp:
+            root = Path(tmp)
+            (root / "checkout").mkdir()
+            evidence = root / "runner/evidence"
+            evidence.mkdir(parents=True)
+            (evidence / "review-head.json").write_text("{}")
+            for event in ("pull_request", "pull_request_review"):
+                for checks in ("failure", "cancelled", "skipped"):
+                    with self.subTest(event=event, checks=checks):
+                        result = self.enforce(root, "ci", event=event, checks=checks, gate_rc=0)
+                        self.assertEqual(result.returncode, 1, result.stderr)
+                        summary = (root / "summary").read_text()
+                        self.assertIn("❌ Checks failed", summary)
+                        self.assertIn("✅ Review approved", summary)
 
     def test_the_job_is_the_verdict_and_waiting_says_so(self):
         gate = self.job("quality-gate")
@@ -848,6 +988,24 @@ class GateHardening(unittest.TestCase):
 
     def test_loop_never_reviews_an_empty_delta(self):
         self.assertIn('[ "$last_reviewed" != "$(git rev-parse HEAD)" ]', (KIT / "scripts" / "review_loop.sh").read_text())
+
+
+class PublishReruns(unittest.TestCase):
+    def test_every_failed_gate_job_on_the_commit_is_rerun(self):
+        runs = [
+            {"databaseId": 1, "status": "completed", "jobs": [{"name": "checks", "conclusion": "success", "databaseId": 11},
+                                                             {"name": "quality-gate", "conclusion": "failure", "databaseId": 12}]},
+            {"databaseId": 2, "status": "completed", "jobs": [{"name": "quality-gate", "conclusion": "success", "databaseId": 21}]},
+            {"databaseId": 3, "status": "in_progress", "jobs": [{"name": "quality-gate", "conclusion": "failure", "databaseId": 31}]},
+            {"databaseId": 4, "status": "completed", "jobs": [{"name": "quality-gate", "conclusion": "failure", "databaseId": 41}]},
+        ]
+        self.assertEqual(evidence_comment.failed_gate_jobs(runs), [("1", "12"), ("4", "41")])
+
+    def test_approve_path_also_reruns(self):
+        src = (KIT / "scripts" / "evidence_comment.py").read_text()
+        pub = src[src.index("def publish("):src.index("def failed_gate_jobs(")]
+        self.assertNotIn("return\n", pub.split("if args.approve:")[1].split("rerun_failed_gates")[0])
+        self.assertIn("rerun_failed_gates(repo, sha)", pub)
 
 
 class CiPolicy(unittest.TestCase):

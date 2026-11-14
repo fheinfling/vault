@@ -145,21 +145,40 @@ def publish(args: argparse.Namespace) -> None:
             print(f"warning: {note}", file=sys.stderr)
         qlib.sh("gh", "api", "-X", "POST", f"repos/{repo}/pulls/{args.pr}/reviews", "-f", f"commit_id={sha}",
                 "-f", f"event={event}", "-f", f"body={text}")
-        print(f"{event} review submitted on {sha[:10]}; the gate re-runs on the review event")
-        return
-    # The workflow has no comment trigger, so re-run the quality-gate job of this commit's newest run
-    # (whatever its event); it then reads the new comment.
-    run = qlib.sh("gh", "run", "list", "--repo", repo, "--workflow", "quality-gate.yml", "--commit", sha,
-                  "--limit", "1", "--json", "databaseId,status",
-                  "-q", '.[0] | select(.status == "completed") | .databaseId', check=False).strip()
-    job = run and qlib.sh("gh", "run", "view", run, "--repo", repo, "--json", "jobs",
-                          "-q", '.jobs[] | select(.name == "quality-gate") | .databaseId', check=False).strip()
-    if job:
-        qlib.sh("gh", "run", "rerun", run, "--repo", repo, "--job", job, check=False)
-        print(f"re-running the quality-gate job of run {run}")
-    else:
-        print("no finished quality-gate run for this head yet; it will read the comment when it runs")
+        print(f"{event} review submitted on {sha[:10]}")
+    rerun_failed_gates(repo, sha)
 
+
+def failed_gate_jobs(runs: list[dict]) -> list[tuple[str, str]]:
+    """(run id, job id) of every completed run's failed quality-gate job.
+
+    A required check passes only when no check run of that name on the commit is red, and every
+    workflow run (the PR event, each review event) leaves its own. So after new evidence or a
+    sign-off, each earlier failed quality-gate job has to be re-evaluated, not just the newest."""
+    out = []
+    for run in runs:
+        if run.get("status") != "completed":
+            continue
+        for job in run.get("jobs", []):
+            if job.get("name") == "quality-gate" and job.get("conclusion") == "failure":
+                out.append((str(run["databaseId"]), str(job["databaseId"])))
+    return out
+
+
+def rerun_failed_gates(repo: str, sha: str) -> None:
+    listed = json.loads(qlib.sh("gh", "run", "list", "--repo", repo, "--workflow", "quality-gate.yml",
+                                "--commit", sha, "--limit", "50", "--json", "databaseId,status", check=False) or "[]")
+    runs = []
+    for run in listed:
+        jobs = json.loads(qlib.sh("gh", "run", "view", str(run["databaseId"]), "--repo", repo, "--json", "jobs",
+                                  "-q", ".jobs", check=False) or "[]")
+        runs.append({**run, "jobs": jobs})
+    targets = failed_gate_jobs(runs)
+    for run_id, job_id in targets:
+        qlib.sh("gh", "run", "rerun", run_id, "--repo", repo, "--job", job_id, check=False)
+        print(f"re-running the failed quality-gate job of run {run_id}")
+    if not targets:
+        print("no failed quality-gate job on this commit to re-run; runs still in progress read the new evidence")
 
 def fetch(args: argparse.Namespace) -> None:
     cfg = qlib.load_config(args.config)
