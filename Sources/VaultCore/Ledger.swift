@@ -17,7 +17,7 @@ public actor Ledger {
     private let db: Database
     private let fields: FieldStorage
 
-    /// Opens or creates the ledger. Unsupported schema versions are refused without changing the file.
+    /// Opens or creates the ledger. Unsupported schema versions are refused; their data is not converted or deleted.
     public init(path: String, cipher: any FieldCipher) throws {
         if path != ":memory:" {
             // A bare file name has no directory component; creating "" would fail.

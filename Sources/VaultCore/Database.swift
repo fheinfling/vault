@@ -44,10 +44,11 @@ final class Database {
         if path != ":memory:" {
             chmod(path, 0o600)
         }
+        // First, so the pragmas below wait out another process's transient lock instead of failing.
+        try execute("PRAGMA busy_timeout=5000")
         try execute("PRAGMA journal_mode=WAL")
         try execute("PRAGMA secure_delete=ON")
         try execute("PRAGMA foreign_keys=ON")
-        try execute("PRAGMA busy_timeout=5000")
     }
 
     deinit {
