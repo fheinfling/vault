@@ -51,7 +51,7 @@ def run_claude(prompt: str, schema_file: Path, model: str, cwd: Path | None = No
         ["claude", "-p", prompt, "--model", model, "--output-format", "json",
          "--json-schema", schema_file.read_text(), "--allowedTools", tools,
          "--permission-mode", "dontAsk"],
-        capture_output=True, text=True, cwd=cwd or qlib.repo_root(),
+        capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=cwd or qlib.repo_root(),
     )
     try:
         out = json.loads(res.stdout)
@@ -78,7 +78,7 @@ def run_codex(prompt: str, schema_file: Path, model: str, cwd: Path | None = Non
     res = subprocess.run(
         ["codex", "exec", "-m", model, *codex_sandbox_args(execute), "--ephemeral", "--skip-git-repo-check",
          "--output-schema", str(schema_file), "-o", out_path, "-"],
-        input=prompt, capture_output=True, text=True, cwd=cwd or qlib.repo_root(),
+        input=prompt, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=cwd or qlib.repo_root(),
     )
     try:
         return json.loads(Path(out_path).read_text())

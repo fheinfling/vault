@@ -4,6 +4,7 @@
 # only to re-run the quality-gate job. The relay's run title is untrusted (a PR can edit the relay):
 # it is accepted only in the exact expected shape, and only for a PR whose live head is that commit.
 # Fork gate runs also need an exact PR title plus matching head repository and branch; neither alone identifies the PR.
+# Job-level permissions enforce least privilege for Scorecard Token-Permissions.
 name: quality-gate-refresh
 
 on:
@@ -11,10 +12,7 @@ on:
     workflows: [quality-gate-review]
     types: [completed]
 
-permissions:
-  contents: read
-  actions: write
-  pull-requests: read
+permissions: {}
 
 concurrency:
   # Keyed on the relay title (PR and head), so two PRs sharing a commit never cancel each other's
@@ -27,6 +25,10 @@ jobs:
     if: github.event.workflow_run.event == 'pull_request_review'
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    permissions:
+      contents: read
+      actions: write
+      pull-requests: read
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}

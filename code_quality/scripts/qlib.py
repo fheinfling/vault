@@ -17,7 +17,7 @@ KIT = HERE.parent  # code_quality/
 
 
 def sh(*args: str, check: bool = True, cwd: str | None = None) -> str:
-    res = subprocess.run(args, capture_output=True, text=True, cwd=cwd)
+    res = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=cwd)
     if check and res.returncode != 0:
         sys.exit(f"command failed ({res.returncode}): {' '.join(args)}\n{res.stderr}")
     return res.stdout

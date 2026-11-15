@@ -37,6 +37,9 @@ swift test
 VAULT_DB=/tmp/test.db .build/debug/vault accounts
 ```
 
+CSV parser fuzzing runs with libFuzzer on Linux; see [Fuzz/README.md](Fuzz/README.md)
+for the local Docker command and crash replay instructions.
+
 ## Install, confined
 The egress allowlist matches the sync by its effective group, so the real installation is a setgid binary (full steps in `scripts/egress/README.md`):
 

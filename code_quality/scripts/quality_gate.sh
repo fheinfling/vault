@@ -62,8 +62,15 @@ done
 if [ "$MODE" = "full" ]; then
   base="${QUALITY_BASE:-origin/main}"
   if git rev-parse --verify -q "$base" >/dev/null; then
-    n=$(python3 "$HERE/check_test_integrity.py" --base "$base" | python3 -I -c 'import json,sys; print(len(json.load(sys.stdin)["findings"]))')
-    [ "$n" -gt 0 ] && echo "NOTE  $n test-integrity signal(s) — the verifier will check whether they are justified (cross_review.py)."
+    log="$STATE/gate-test-integrity.log"
+    start=$(date +%s)
+    if n=$({ python3 "$HERE/check_test_integrity.py" --base "$base" | python3 -I -c 'import json,sys; print(len(json.load(sys.stdin)["findings"]))'; } 2>"$log"); then
+      [ "$n" -gt 0 ] && echo "NOTE  $n test-integrity signal(s) — the verifier will check whether they are justified (cross_review.py)."
+    else
+      failed=1
+      echo "FAIL  ($(( $(date +%s) - start ))s)  check_test_integrity.py"
+      { echo "── check_test_integrity.py failed. Last 60 lines:"; tail -n 60 "$log"; } >&2
+    fi
   fi
 fi
 
