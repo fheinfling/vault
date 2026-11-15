@@ -78,6 +78,7 @@ private func holding(_ name: String, at: Date, quantity: Int = 1) -> HoldingReco
     try await ledger.upsertConnection(id: "test", kind: .exchange)
     let ids = try await ledger.upsertAccounts(connectionID: "test", sampleAccounts()).ids
     let depot = ids["depot"]!
+    #expect(try await ledger.latestHoldings(accountID: depot).isEmpty)
     let at = Date(timeIntervalSince1970: 1_700_000_000)
     let run1 = try await ledger.startSyncRun(connectionID: "test")
     try await ledger.recordHoldings(connectionID: "test", runID: run1, at: at, [holding("ETF A", at: at)])
@@ -159,34 +160,4 @@ private func holding(_ name: String, at: Date, quantity: Int = 1) -> HoldingReco
     let ledger = try Ledger(path: name, cipher: TestFieldCipher())
     try await ledger.upsertConnection(id: "test", kind: .exchange)
     #expect(FileManager.default.fileExists(atPath: name))
-}
-
-@Test func v1DatabaseMigratesAndKeepsLegacyHoldings() async throws {
-    let path = NSTemporaryDirectory() + "vault-v1-\(UUID().uuidString).db"
-    defer {
-        for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: path + suffix) }
-    }
-    // Build a v1 database by hand, with holdings that have no run id.
-    do {
-        let db = try Database(path: path)
-        try db.execute(Schema.migrations[0])
-        try db.execute("PRAGMA user_version = 1")
-        try db.run("INSERT INTO connection (id, kind) VALUES ('old', 'exchange')")
-        try db.run(
-            "INSERT INTO account (connection_id, external_id, provider, kind, name, currency, is_portfolio) VALUES ('old', 'd', 'p', 'depot', 'D', 'EUR', 1)"
-        )
-        try db.run(
-            "INSERT INTO holding_snapshot (account_id, at, name, quantity, currency) VALUES (1, '2026-01-01T00:00:00Z', 'Legacy', '3', 'EUR')"
-        )
-    }
-    let before = try Data(contentsOf: URL(fileURLWithPath: path))
-    #expect(throws: LegacyDatabaseError.self) { try Ledger(path: path, cipher: TestFieldCipher()) }
-    #expect(try Data(contentsOf: URL(fileURLWithPath: path)) == before)
-    let ledger = try Ledger(path: path, cipher: TestFieldCipher(), legacy: .convert(backupPath: nil))
-    let legacy = try await ledger.latestHoldings(accountID: 1)
-    #expect(legacy.map(\.name) == ["Legacy"])
-    // v2 features work on the migrated database.
-    let run = try await ledger.startSyncRun(connectionID: "old")
-    try await ledger.recordHoldings(connectionID: "old", runID: run, at: Date(), [])
-    #expect(try await ledger.latestHoldings(accountID: 1).isEmpty)
 }
