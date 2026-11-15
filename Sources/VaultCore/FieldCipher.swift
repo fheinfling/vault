@@ -32,35 +32,4 @@ struct FieldStorage {
     func index(_ value: String, _ table: String) -> SQLValue {
         .text(cipher.blindIndex(value, context: "\(table).external_id"))
     }
-
-    /// Called inside the v3 schema transaction, so failure leaves the legacy database retryable.
-    func migrate(_ db: Database) throws {
-        let columns = [
-            "account": ["name", "iban_masked", "provider"],
-            "balance_snapshot": ["amount"],
-            "holding_snapshot": ["name", "isin", "quantity", "price", "value"],
-            "transaction": ["amount", "counterparty", "purpose", "category", "raw_json"],
-            "activity": ["isin", "quantity", "price", "fee", "tax", "amount", "raw_json"],
-        ]
-        for (table, names) in columns {
-            for row in try db.query("SELECT * FROM \"\(table)\"") {
-                var assignments: [String] = []
-                var values: [SQLValue] = []
-                for name in names {
-                    // Every pre-v3 value is plaintext, even one that happens to start with "v1:".
-                    guard let value = row[name]?.string else { continue }
-                    assignments.append("\(name) = ?")
-                    values.append(try seal(value, "\(table).\(name)"))
-                }
-                if let externalID = row["external_id"]?.string {
-                    assignments += ["external_id = ?", "external_id_sealed = ?"]
-                    values += [index(externalID, table), try seal(externalID, "\(table).external_id_sealed")]
-                }
-                if !assignments.isEmpty {
-                    try db.run("UPDATE \"\(table)\" SET \(assignments.joined(separator: ", ")) WHERE id = ?",
-                               values + [row["id"]!])
-                }
-            }
-        }
-    }
 }

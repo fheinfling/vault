@@ -15,8 +15,6 @@ struct VaultCLI {
           schedule [--off]        register (or remove) the launch agent, every 4 hours
             [--require-egress]    and set VAULT_REQUIRE_EGRESS=1 in its environment (kept on re-schedule)
           egress                  is this process confined by the egress allowlist?
-          migrate [--backup PATH] encrypt a database from before field encryption; with --backup, first
-                                  write a verified plaintext copy (needed to roll back to an older vault)
           db-path                 print the database path
 
         environment:
@@ -50,20 +48,6 @@ struct VaultCLI {
             case .unconfined(let reason):
                 print("unconfined: \(reason)")
                 exit(1)
-            }
-        case "migrate":
-            let backup = try migrateBackupPath(arguments)
-            let ledger = try Ledger(
-                path: databasePath, cipher: AppleFieldCipher(secrets: KeychainSecretStore()),
-                legacy: .convert(backupPath: backup)
-            )
-            guard let version = ledger.convertedLegacyVersion else {
-                print("nothing to migrate: the database has no pre-encryption data.")
-                return
-            }
-            print("encrypted the schema v\(version) database.")
-            if let backup {
-                print("plaintext pre-encryption backup: \(backup). Delete it once you no longer need to roll back.")
             }
         case "accounts":
             let ledger = try Ledger(path: databasePath, cipher: AppleFieldCipher(secrets: KeychainSecretStore()))
@@ -177,16 +161,6 @@ struct VaultCLI {
               let value = Int64(arguments[index + 1])
         else { throw CLIError.usage("\(flag) <number> is required") }
         return value
-    }
-
-    /// Parses `migrate [--backup PATH]` before the database is opened. Anything else, `--backup=PATH` or a
-    /// misspelled option included, is rejected: ignoring it would convert without the requested rollback copy.
-    static func migrateBackupPath(_ arguments: [String]) throws -> String? {
-        if arguments.isEmpty { return nil }
-        guard arguments.count == 2, arguments[0] == "--backup", !arguments[1].isEmpty, !arguments[1].hasPrefix("-") else {
-            throw CLIError.usage("usage: vault migrate [--backup PATH]")
-        }
-        return arguments[1]
     }
 
     static let scheduleFlags: Set = ["--off", "--require-egress"]

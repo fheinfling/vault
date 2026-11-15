@@ -16,12 +16,9 @@ public struct AccountUpsertResult: Sendable, Equatable {
 public actor Ledger {
     private let db: Database
     private let fields: FieldStorage
-    /// The pre-encryption schema version this open converted, or nil when there was nothing to convert.
-    public nonisolated let convertedLegacyVersion: Int64?
 
-    /// Opens or creates the ledger. A database from before field encryption is converted only with
-    /// `legacy: .convert`; otherwise it is left untouched and `LegacyDatabaseError` is thrown.
-    public init(path: String, cipher: any FieldCipher, legacy: LegacyConversion = .refuse) throws {
+    /// Opens or creates the ledger. Unsupported schema versions are refused without changing the file.
+    public init(path: String, cipher: any FieldCipher) throws {
         if path != ":memory:" {
             // A bare file name has no directory component; creating "" would fail.
             let directory = (path as NSString).deletingLastPathComponent
@@ -32,9 +29,8 @@ public actor Ledger {
                 )
             }
         }
-        db = try Database(path: path, writer: true)
+        db = try Schema.open(path: path)
         fields = FieldStorage(cipher: cipher)
-        convertedLegacyVersion = try Schema.migrate(db, fields: fields, legacy: legacy)
     }
 
     // MARK: - Connections
@@ -249,34 +245,20 @@ public actor Ledger {
     }
 
     /// The positions from the most recent holdings set for this account. Empty if that set was empty.
-    /// Rows written before v2 have no set; for those the latest timestamp is used.
     public func latestHoldings(accountID: Int64) throws -> [HoldingRecord] {
         let latestSet = try db.query(
             "SELECT run_id FROM holding_set WHERE account_id = ? ORDER BY id DESC LIMIT 1", [.integer(accountID)]
         ).first?["run_id"]?.int64
-        let rows: [[String: SQLValue]]
-        if let runID = latestSet {
-            rows = try db.query(
-                """
-                SELECT h.*, a.external_id_sealed FROM holding_snapshot h
-                JOIN account a ON a.id = h.account_id
-                WHERE h.account_id = ? AND h.run_id = ?
-                ORDER BY h.id
-                """,
-                [.integer(accountID), .integer(runID)]
-            )
-        } else {
-            rows = try db.query(
-                """
-                SELECT h.*, a.external_id_sealed FROM holding_snapshot h
-                JOIN account a ON a.id = h.account_id
-                WHERE h.account_id = ? AND h.run_id IS NULL
-                  AND h.at = (SELECT MAX(at) FROM holding_snapshot WHERE account_id = ? AND run_id IS NULL)
-                ORDER BY h.id
-                """,
-                [.integer(accountID), .integer(accountID)]
-            )
-        }
+        guard let runID = latestSet else { return [] }
+        let rows = try db.query(
+            """
+            SELECT h.*, a.external_id_sealed FROM holding_snapshot h
+            JOIN account a ON a.id = h.account_id
+            WHERE h.account_id = ? AND h.run_id = ?
+            ORDER BY h.id
+            """,
+            [.integer(accountID), .integer(runID)]
+        )
         return try rows.compactMap { row in
             guard let at = row["at"]?.string.flatMap(Self.date),
                   let quantity = try fields.open(row["quantity"], "holding_snapshot.quantity").flatMap({ Decimal(string: $0) })

@@ -47,7 +47,7 @@ Report at most three Nits per review.
   required test/platform seam, unused parameters/options/config; safe path:
   the acceptance criteria use it, or a test or platform boundary needs the seam.
 - A new or changed connector: its provider host is in `scripts/egress/vault.pf.conf`, it uses read-only credentials where the provider offers them, and every failure maps to a `ConnectorError` case (a `needsUserAction` is how the user gets notified).
-- A schema change is a new entry in `Schema.migrations`, never an edit of an old one, and old databases still open.
+- Until the first release, the schema is a single create script. A schema change edits it and bumps `user_version`; older files are refused, never misread. Real migrations return with the first release.
 - Changed `Connector` or `SecretStore` contracts: every connector and adapter still works.
 - New behavior is behind a flag (default off) and the PR says how to revert.
 

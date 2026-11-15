@@ -43,43 +43,9 @@ private struct Fixture {
         try await ledger.upsertActivities(connectionID: "test", [Self.activity])
     }
 
-    func writeV2() throws {
-        let db = try Database(path: path)
-        for migration in Schema.migrations.prefix(2) { try db.execute(migration) }
-        try db.execute("PRAGMA user_version = 2")
-        try db.run("INSERT INTO connection (id, kind) VALUES ('test', 'exchange')")
-        for table in ["account", "balance_snapshot", "holding_snapshot", "transaction", "activity"] {
-            var values = Self.values[table]!.mapValues(SQLValue.text)
-            if let externalID = values.removeValue(forKey: "external_id_sealed") { values["external_id"] = externalID }
-            values["currency"] = .text("EUR")
-            if table == "account" {
-                values["connection_id"] = .text("test")
-                values["kind"] = .text("depot")
-                values["is_portfolio"] = .integer(1)
-            } else {
-                values["account_id"] = .integer(1)
-                values[table == "transaction" ? "booked_at" : "at"] = .text(Ledger.iso(Self.at))
-            }
-            if table == "activity" { values["type"] = .text("buy") }
-            let columns = values.keys.sorted()
-            let placeholders = Array(repeating: "?", count: columns.count).joined(separator: ",")
-            try db.run("INSERT INTO \"\(table)\" (\(columns.joined(separator: ","))) VALUES (\(placeholders))", columns.map { values[$0]! })
-        }
-    }
-
-    func checkV3Schema() throws {
-        let db = try Database(path: path)
-        #expect(try db.query("PRAGMA user_version").first?["user_version"]?.int64 == 3)
-        let triggers = try db.query("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name").compactMap { $0["name"]?.string }
-        let content = ["account", "activity", "balance_snapshot", "holding_snapshot", "transaction"].map { "\($0)_requires_v3" }
-        let fence = Schema.fencedTables.flatMap { table in ["delete", "insert", "update"].map { "\(table)_\($0)_requires_v3_writer" } }
-        #expect(triggers == (content + fence).sorted())
-    }
-
     func checkStoredValues() throws {
         let db = try Database(path: path)
-        #expect(try db.query("PRAGMA user_version").first?["user_version"]?.int64 == 3)
-        #expect(try db.query("SELECT * FROM field_encryption_cleanup").isEmpty)
+        #expect(try db.query("PRAGMA user_version").first?["user_version"]?.int64 == 4)
         for (table, values) in Self.values {
             let row = try #require(db.query("SELECT * FROM \"\(table)\"").first)
             for (column, expected) in values {
@@ -142,72 +108,18 @@ private struct Fixture {
     try await fixture.checkReadsAndUpserts()
 }
 
-@Test func v2PlaintextMigratesOnceAndKeepsUpsertIdentity() async throws {
-    let fixture = Fixture()
-    defer { fixture.remove() }
-    try fixture.writeV2()
-    // Converting must migrate every table and remove old plaintext pages and WAL frames.
-    let ledger = try Ledger(path: fixture.path, cipher: TestFieldCipher(), legacy: .convert(backupPath: nil))
-    #expect(ledger.convertedLegacyVersion == 2)
-    try fixture.checkV3Schema()
-    try fixture.checkStoredValues()
-    try fixture.checkFiles()
-    try await fixture.checkReadsAndUpserts()
-}
-
 @Test func copiedCiphertextAndPlaintextReplacementFailClosed() async throws {
     let fixture = Fixture()
     defer { fixture.remove() }
     try await fixture.write()
     let ledger = try Ledger(path: fixture.path, cipher: TestFieldCipher())
-    // Tampering with direct SQL access, not a pre-v3 binary, so it holds the writer capability.
-    let db = try Database(path: fixture.path, writer: true)
+    let db = try Database(path: fixture.path)
     try db.run("UPDATE account SET name = provider")
     await #expect(throws: TestFieldCipher.Failure.self) { try await ledger.accounts() }
     try db.run("UPDATE account SET name = 'plaintext replacement'")
     await #expect(throws: FieldEncodingError.self) { try await ledger.accounts() }
     try db.run("UPDATE account SET name = 'v1:invalid!'")
     await #expect(throws: FieldEncodingError.self) { try await ledger.accounts() }
-}
-
-private struct FailingMigrationCipher: FieldCipher {
-    func seal(_ plaintext: Data, context: String) throws -> Data {
-        if context == "account.external_id_sealed" { throw TestFieldCipher.Failure.context }
-        return try TestFieldCipher().seal(plaintext, context: context)
-    }
-    func open(_ sealed: Data, context: String) throws -> Data { try TestFieldCipher().open(sealed, context: context) }
-    func blindIndex(_ value: String, context: String) -> String { TestFieldCipher().blindIndex(value, context: context) }
-}
-
-@Test func failedMigrationRollsBackSchemaAndDataAndCanRetry() throws {
-    let fixture = Fixture()
-    defer { fixture.remove() }
-    try fixture.writeV2()
-    #expect(throws: TestFieldCipher.Failure.self) {
-        try Ledger(path: fixture.path, cipher: FailingMigrationCipher(), legacy: .convert(backupPath: nil))
-    }
-    do {
-        let db = try Database(path: fixture.path)
-        #expect(try db.query("PRAGMA user_version").first?["user_version"]?.int64 == 2)
-        #expect(try db.query("SELECT name, external_id FROM account").first?["name"]?.string == "Giro")
-        #expect(try db.query("PRAGMA table_info(account)").allSatisfy { $0["name"]?.string != "external_id_sealed" })
-        #expect(try db.query("SELECT name FROM sqlite_master WHERE type = 'trigger'").isEmpty)
-    }
-    _ = try Ledger(path: fixture.path, cipher: TestFieldCipher(), legacy: .convert(backupPath: nil))
-    try fixture.checkStoredValues()
-    try fixture.checkFiles()
-}
-
-@Test func pendingPlaintextCleanupIsRetriedOnOpen() async throws {
-    let fixture = Fixture()
-    defer { fixture.remove() }
-    try await fixture.write()
-    do {
-        let db = try Database(path: fixture.path)
-        try db.run("INSERT INTO field_encryption_cleanup VALUES (1)")
-    }
-    _ = try Ledger(path: fixture.path, cipher: TestFieldCipher())
-    try fixture.checkStoredValues()
 }
 
 @Test func encryptedNamesSortAfterDecryptionAndParentLookupUsesIndex() async throws {
@@ -231,175 +143,4 @@ private struct FailingMigrationCipher: FieldCipher {
     }
     try await ledger.recordHoldings(connectionID: "test", runID: run, at: Fixture.at, holdings)
     #expect(try await ledger.latestHoldings(accountID: ids["p"]!).map(\.name) == ["A", "Z"])
-}
-
-@Test func legacyPlaintextWithEnvelopePrefixIsSealedDuringMigration() throws {
-    let fixture = Fixture()
-    defer { fixture.remove() }
-    try fixture.writeV2()
-    let purpose = "v1: invoice correction"
-    do {
-        let db = try Database(path: fixture.path)
-        try db.run("UPDATE \"transaction\" SET purpose = ?", [.text(purpose)])
-    }
-    _ = try Ledger(path: fixture.path, cipher: TestFieldCipher(), legacy: .convert(backupPath: nil))
-    let db = try Database(path: fixture.path)
-    let row = try #require(db.query("SELECT purpose FROM \"transaction\"").first)
-    #expect(try FieldStorage(cipher: TestFieldCipher()).open(row["purpose"], "transaction.purpose") == purpose)
-}
-
-/// Issues the statements a pre-v3 binary (base commit 982b1b8) issues, with plaintext external IDs and values,
-/// and expects each to abort without adding a row.
-private func expectPreV3WritesAbort(_ db: Database) throws {
-    let legacyWrites: [(String, [SQLValue])] = [
-        ("""
-         INSERT INTO account (connection_id, external_id, provider, kind, name, iban_masked, currency, is_portfolio, hidden)
-         VALUES ('test', 'DE00TEST', 'PrivateBank', 'depot', 'Giro', NULL, 'EUR', 1, 0)
-         ON CONFLICT(connection_id, external_id) DO UPDATE SET name = excluded.name
-         """, []),
-        ("INSERT INTO balance_snapshot (account_id, run_id, at, amount, currency) VALUES (1, NULL, ?, '1.00', 'EUR')",
-         [.text(Ledger.iso(Fixture.at))]),
-        ("""
-         INSERT INTO holding_snapshot (account_id, run_id, at, isin, name, quantity, price, value, currency)
-         VALUES (1, NULL, ?, NULL, 'Fund', '1', NULL, NULL, 'EUR')
-         """, [.text(Ledger.iso(Fixture.at))]),
-        ("""
-         INSERT INTO "transaction" (account_id, external_id, booked_at, amount, currency) VALUES (1, 'DE00TX', ?, '1.00', 'EUR')
-         ON CONFLICT(account_id, external_id) DO UPDATE SET amount = excluded.amount
-         """, [.text(Ledger.iso(Fixture.at))]),
-        ("""
-         INSERT INTO activity (account_id, external_id, at, type, amount, currency) VALUES (1, 'DE00ACT', ?, 'buy', '1.00', 'EUR')
-         ON CONFLICT(account_id, external_id) DO UPDATE SET amount = excluded.amount
-         """, [.text(Ledger.iso(Fixture.at))]),
-        ("INSERT INTO connection (id, kind) VALUES ('test', 'exchange') ON CONFLICT(id) DO UPDATE SET kind = excluded.kind", []),
-        ("UPDATE connection SET needs_user_action = 'approve' WHERE id = 'test'", []),
-        ("UPDATE connection SET last_sync = ?, needs_user_action = NULL WHERE id = 'test'", [.text(Ledger.iso(Fixture.at))]),
-        ("UPDATE account SET parent_id = 1 WHERE id = 1", []),
-        ("DELETE FROM sync_cursor WHERE connection_id = 'test'", []),
-        ("""
-         INSERT INTO holding_set (account_id, run_id, at) VALUES (1, 1, ?)
-         ON CONFLICT(account_id, run_id) DO UPDATE SET at = excluded.at
-         """, [.text(Ledger.iso(Fixture.at))]),
-        ("""
-         INSERT INTO sync_cursor (connection_id, stream, value) VALUES ('test', 'transactions', '2030-01-01')
-         ON CONFLICT(connection_id, stream) DO UPDATE SET value = excluded.value
-         """, []),
-        ("INSERT INTO sync_run (connection_id, started) VALUES ('test', ?)", [.text(Ledger.iso(Fixture.at))]),
-        ("UPDATE sync_run SET finished = ?, ok = 1, accounts = 1, rows = 0, error = NULL WHERE id = 1", [.text(Ledger.iso(Fixture.at))]),
-    ]
-    let before = try fencedTableContents(db)
-    for (sql, values) in legacyWrites {
-        do {
-            try db.run(sql, values)
-            Issue.record("pre-v3 write must abort: \(sql)")
-        } catch let error as DatabaseError {
-            #expect(error.message == "no such function: \(Database.writerCapability)", "\(sql)")
-        }
-    }
-    #expect(try fencedTableContents(db) == before, "a pre-v3 write changed the ledger")
-}
-
-private func fencedTableContents(_ db: Database) throws -> [String: [[String: SQLValue]]] {
-    var contents: [String: [[String: SQLValue]]] = [:]
-    for table in Schema.fencedTables { contents[table] = try db.query("SELECT * FROM \"\(table)\" ORDER BY rowid") }
-    return contents
-}
-
-@Test(arguments: [false, true]) func preV3WritersAbortOnV3Database(convertLegacy: Bool) async throws {
-    let fixture = Fixture()
-    defer { fixture.remove() }
-    if convertLegacy {
-        try fixture.writeV2()
-        _ = try Ledger(path: fixture.path, cipher: TestFieldCipher(), legacy: .convert(backupPath: nil))
-    } else {
-        try await fixture.write()
-    }
-    try fixture.checkV3Schema()
-    try expectPreV3WritesAbort(try Database(path: fixture.path))
-    try fixture.checkStoredValues()
-}
-
-/// A pre-v3 sync that has already written to a v2 database, then resumes after another process converted it,
-/// must not store anything: not holding sets (which would hide the depot's holdings), not cursors (which would
-/// skip history past the next run's overlap window), and not a successful run.
-@Test func inFlightPreV3SyncCannotWriteAfterConversion() async throws {
-    let fixture = Fixture()
-    defer { fixture.remove() }
-    try fixture.writeV2()
-    let legacy = try Database(path: fixture.path)
-    try legacy.run("INSERT INTO sync_run (connection_id, started) VALUES ('test', ?)", [.text(Ledger.iso(Fixture.at))])
-    _ = try Ledger(path: fixture.path, cipher: TestFieldCipher(), legacy: .convert(backupPath: nil))
-    try expectPreV3WritesAbort(legacy)
-    try fixture.checkStoredValues()
-    // The v3 ledger still writes every fenced table.
-    let ledger = try Ledger(path: fixture.path, cipher: TestFieldCipher())
-    let run = try await ledger.startSyncRun(connectionID: "test", at: Fixture.at)
-    try await ledger.recordHoldings(connectionID: "test", runID: run, at: Fixture.at, [Fixture.holding])
-    try await ledger.setCursor(connectionID: "test", stream: .transactions, value: Fixture.at)
-    try await ledger.finishSyncRun(id: run, ok: true, accounts: 1, rows: 0, error: nil)
-    try await ledger.markSynced(connectionID: "test", at: Fixture.at)
-    #expect(try await ledger.latestHoldings(accountID: 1) == [Fixture.holding])
-    #expect(try await ledger.cursor(connectionID: "test", stream: .transactions) == Fixture.at)
-}
-
-@Test func freshDatabaseStartsAtV3WithWriterTriggers() throws {
-    let fixture = Fixture()
-    defer { fixture.remove() }
-    let ledger = try Ledger(path: fixture.path, cipher: TestFieldCipher())
-    #expect(ledger.convertedLegacyVersion == nil)
-    try fixture.checkV3Schema()
-}
-
-@Test func legacyDatabaseIsLeftUntouchedWithoutExplicitConversion() throws {
-    let fixture = Fixture()
-    defer { fixture.remove() }
-    try fixture.writeV2()
-    let before = try Data(contentsOf: URL(fileURLWithPath: fixture.path))
-    #expect(throws: LegacyDatabaseError.self) { try Ledger(path: fixture.path, cipher: TestFieldCipher()) }
-    let db = try Database(path: fixture.path)
-    #expect(try db.query("PRAGMA user_version").first?["user_version"]?.int64 == 2)
-    #expect(try db.query("SELECT name FROM account").first?["name"]?.string == "Giro")
-    #expect(try db.query("PRAGMA table_info(account)").allSatisfy { $0["name"]?.string != "external_id_sealed" })
-    #expect(try db.query("SELECT name FROM sqlite_master WHERE name = 'field_encryption_cleanup'").isEmpty)
-    #expect(try Data(contentsOf: URL(fileURLWithPath: fixture.path)) == before)
-}
-
-@Test func conversionWithBackupWritesVerifiedPlaintextCopyFirst() throws {
-    let fixture = Fixture()
-    let backup = fixture.path + ".pre-v3"
-    defer {
-        fixture.remove()
-        for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: backup + suffix) }
-    }
-    try fixture.writeV2()
-    let ledger = try Ledger(path: fixture.path, cipher: TestFieldCipher(), legacy: .convert(backupPath: backup))
-    #expect(ledger.convertedLegacyVersion == 2)
-    try fixture.checkV3Schema()
-    try fixture.checkStoredValues()
-    try fixture.checkFiles()
-    let mode = try FileManager.default.attributesOfItem(atPath: backup)[.posixPermissions] as? Int
-    #expect(mode == 0o600)
-    // The copy is exactly what a pre-v3 binary expects: schema v2 with plaintext rows.
-    let copy = try Database(path: backup)
-    #expect(try copy.query("PRAGMA user_version").first?["user_version"]?.int64 == 2)
-    #expect(try copy.query("SELECT name, external_id FROM account").first == ["name": .text("Giro"), "external_id": .text("DE00TEST")])
-    #expect(try copy.query("SELECT name FROM sqlite_master WHERE type = 'trigger'").isEmpty)
-}
-
-@Test func existingBackupFileStopsConversion() throws {
-    let fixture = Fixture()
-    let backup = fixture.path + ".pre-v3"
-    defer {
-        fixture.remove()
-        try? FileManager.default.removeItem(atPath: backup)
-    }
-    try fixture.writeV2()
-    try Data("keep me".utf8).write(to: URL(fileURLWithPath: backup))
-    #expect(throws: DatabaseError.self) {
-        try Ledger(path: fixture.path, cipher: TestFieldCipher(), legacy: .convert(backupPath: backup))
-    }
-    #expect(try Data(contentsOf: URL(fileURLWithPath: backup)) == Data("keep me".utf8))
-    let db = try Database(path: fixture.path)
-    #expect(try db.query("PRAGMA user_version").first?["user_version"]?.int64 == 2)
-    #expect(try db.query("SELECT name FROM account").first?["name"]?.string == "Giro")
 }

@@ -79,25 +79,4 @@ equality within a table; row counts, relationships and ciphertext lengths are al
 Connection identifiers, action messages and sync errors must not contain credentials or
 financial details.
 
-A database from before field encryption (schema v1/v2) is never converted by ordinary
-commands; they stop with `database schema v2 predates field encryption`. Convert it explicitly:
-
-    vault migrate --backup ~/vault-pre-v3.db
-
-`--backup` first writes a plaintext copy of the unconverted database (mode 0600, refuses to
-overwrite an existing file) and checks it before anything is sealed. That copy is the rollback
-path: to go back to a pre-encryption binary, stop vault and put the copy in place of `vault.db`;
-reverting code alone cannot decrypt the converted database. Delete the copy once you no longer
-need to roll back. Without `--backup` there is no way back to a pre-encryption binary.
-
-The single field-encryption migration, v3 after unchanged v1/v2, adds the sealed-ID columns,
-cleanup marker and writer-protection triggers, and seals every legacy row in
-one transaction. Fresh databases also start at v3 with these triggers. Conversion then vacuums
-SQLite and truncates its WAL to remove old plaintext from the live files. Interrupted cleanup
-is retried on the next open; other database readers must close for cleanup to finish. Older copies, backups and filesystem
-snapshots are not scrubbed. Do not run an older binary against a converted database: every
-write to a ledger table needs a SQL function only the v3 ledger registers, so an older binary's
-writes fail with `no such function: vault_v3_writer`, including a sync that was already running
-when the conversion committed. `vault migrate` accepts only `--backup PATH` (not `--backup=PATH`)
-and rejects anything else before touching the database.
-Keep the Keychain item for any encrypted databases you retain.
+The schema is created fresh; pre-release databases with older schema versions must be deleted and synced again.
