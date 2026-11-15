@@ -35,5 +35,11 @@ one in the same Linux environment using the built binary:
   Fuzz/.build/artifacts/crash-<hash>
 ```
 
-No application behavior or storage changes. To revert, remove `Fuzz/`,
-`scripts/fuzz.sh`, the `fuzz` CI job, and the README link.
+No application behavior or storage changes. To revert, `git revert` the commit that
+added fuzzing (552b92a) rather than deleting files by hand, then delete the
+`Fuzz/Corpus/** binary` line from `.gitattributes` (it was added in e5a22e0, together
+with unrelated kit updates that should stay). A manual removal must undo every piece
+together: `Fuzz/`, `scripts/fuzz.sh`, the `fuzz` CI job, the README link, that
+`.gitattributes` line, and the `Fuzz/Package.swift` check in
+`scripts/check-no-dependencies.sh`. That check fails without `Fuzz/`, which would
+block the full quality gate.
