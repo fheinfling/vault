@@ -1,0 +1,4 @@
+id,note,amount
+1,"line one
+line two, with ""quotes""",-2.00
+2,"",0
