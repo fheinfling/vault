@@ -159,19 +159,20 @@ def select_gate_run(runs: list[dict], sha: str, pr: dict) -> dict | None:
     """Newest pull_request run of `pr` for sha from the workflow-runs API, regardless of status/verdict.
 
     Callers list quality-gate.yml's runs. A run belongs to the PR when its pull_requests list names
-    it, or (fork PRs, whose runs carry an empty list) when it ran on the PR's head repository and
-    branch. Two PRs can share a head commit; only this PR's run judges this PR's reviews.
+    it, or (fork PRs, whose runs carry an empty list) when its exact PR title and head repository
+    and branch match. A fork controls its title; two PRs can share the same head repository/branch.
     Creation time (then ID to break ties) determines recency; an older run's later re-run must not
     displace the newest PR run.
     """
     number = pr["number"]
     head_repo = ((pr.get("head") or {}).get("repo") or {}).get("full_name")
-    head_ref = (pr.get("head") or {}).get("ref")
+    head_ref = (pr.get("head") or {}).get("ref") or ""
 
     def ours(run: dict) -> bool:
         if any(p.get("number") == number for p in run.get("pull_requests") or []):
             return True
-        return (not run.get("pull_requests") and head_repo is not None
+        return (not run.get("pull_requests") and head_repo not in (None, "")
+                and run.get("display_title") == f"quality-gate for PR #{number}"
                 and (run.get("head_repository") or {}).get("full_name") == head_repo
                 and run.get("head_branch") == head_ref)
 
@@ -217,7 +218,11 @@ def refresh_gate(repo: str, sha: str, pr: dict) -> None:
         print(f"::notice title=PR head moved::#{pr['number']} is now at {live[:10]}, not {sha[:10]}; "
               "the new head's own run reads the evidence. Not re-running the stale run.")
         return
-    qlib.sh("gh", "run", "rerun", run_id, "--repo", repo, "--job", str(job["id"]))
+    try:
+        qlib.sh("gh", "run", "rerun", run_id, "--repo", repo, "--job", str(job["id"]))
+    except SystemExit as exc:
+        sys.exit(f"evidence_comment: GitHub refused to re-run quality-gate.yml run {run_id}; "
+                 f"push a commit or close and reopen PR #{pr['number']} to start a fresh gate run.\n{exc}")
     print(f"re-running quality-gate job {job['id']} of run {run_id}")
 
 

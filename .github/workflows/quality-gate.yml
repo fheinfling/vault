@@ -33,6 +33,8 @@
 # A re-run keeps the original event, so the gate job re-reads the PR's live base and its policy.
 # The ruleset still requires only `checks` and `quality-gate`.
 name: quality-gate
+# Fork runs omit pull_requests, so refresh needs the PR in the title; quotes keep ' #' from starting a YAML comment.
+run-name: "${{ github.event_name == 'pull_request' && format('quality-gate for PR #{0}', github.event.pull_request.number) || github.workflow }}"
 
 on:
   pull_request:

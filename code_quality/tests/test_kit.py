@@ -1062,7 +1062,7 @@ class GateRefreshWorkflow(unittest.TestCase):
             *actions/workflows/quality-gate.yml/runs*) cat "$RUNS" ;;
             "api repos/o/r/actions/runs/"*"/jobs"*) printf '%s\n' "$JOB" ;;
             "api repos/o/r/actions/runs/"*) next "$STATES" ;;
-            "run rerun "*) ;;
+            "run rerun "*) return "$RERUN_RC" ;;
             *) echo "unexpected gh call: $*" >&2; return 1 ;;
           esac
         }
@@ -1093,7 +1093,9 @@ class GateRefreshWorkflow(unittest.TestCase):
         triggers = wf.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
         self.assertEqual(triggers.strip(), "workflow_run:\n    workflows: [quality-gate-review]\n    types: [completed]")
         permissions = wf.split("\npermissions:\n", 1)[1].split("\nconcurrency:", 1)[0]
-        self.assertEqual(permissions.strip(), "contents: read\n  actions: write")
+        entries = [line.split("#", 1)[0].strip() for line in permissions.splitlines()]
+        self.assertEqual(dict(line.split(": ", 1) for line in entries if line),
+                         {"contents": "read", "actions": "write", "pull-requests": "read"})
         self.assertEqual(wf.count("permissions:"), 1)
         self.assertIn("if: github.event.workflow_run.event == 'pull_request_review'", wf)
         self.assertIn("TITLE: ${{ github.event.workflow_run.display_title }}", wf)
@@ -1108,6 +1110,14 @@ class GateRefreshWorkflow(unittest.TestCase):
         self.assertIn("max_by([.created_at, .id])", self.script())
         self.assertIn('select(.name == "quality-gate")', self.script())
 
+    def test_gate_run_name_is_quoted_and_identifies_the_pr(self):
+        gate = (KIT / "ci/quality-gate.yml").read_text()
+        line = next(line for line in gate.splitlines() if line.startswith("run-name:"))
+        self.assertRegex(line, r'^run-name: ".*quality-gate for PR #.*"$')
+        self.assertIn("github.event_name == 'pull_request'", line)
+        self.assertIn("format('quality-gate for PR #{0}', github.event.pull_request.number)", line)
+        self.assertIn("|| github.workflow", line)
+
     def installed(self):
         names = [n for n in re.findall(r'"(quality-gate[\w-]*\.yml)"', (KIT / "install.py").read_text())]
         return names
@@ -1116,13 +1126,13 @@ class GateRefreshWorkflow(unittest.TestCase):
         self.assertEqual(sorted(set(self.installed())),
                          ["quality-gate-refresh.yml", "quality-gate-review.yml", "quality-gate.yml"])
 
-    def run_obj(self, id, *, pr=7, repo="o/r", branch="feature", created=None, event="pull_request"):
+    def run_obj(self, id, *, pr=7, repo="o/r", branch="feature", created=None, event="pull_request", title=None):
         return {"id": id, "event": event, "head_sha": self.SHA, "created_at": created or f"2026-11-15T10:00:{id:02d}Z",
                 "pull_requests": [{"number": pr}] if pr else [], "head_repository": {"full_name": repo},
-                "head_branch": branch}
+                "head_branch": branch, "display_title": title}
 
     def execute(self, *, title=None, runs=None, pr_heads=None, states=None, job="21",
-                head_repo="o/r", head_ref="feature"):
+                head_repo="o/r", head_ref="feature", rerun_rc=0):
         """Run the real workflow shell. gh is a stub that serves JSON from files and rejects flag
         combinations the real CLI rejects; jq and bash are real."""
         runs = runs if runs is not None else [self.run_obj(2)]
@@ -1139,7 +1149,7 @@ class GateRefreshWorkflow(unittest.TestCase):
             env = {**os.environ, "GH_REPO": "o/r", "TITLE": title if title is not None else self.TITLE,
                    "JOB": job, "HEAD_REPO": head_repo, "HEAD_REF": head_ref, "RUNS": str(root / "runs"),
                    "PR_HEADS": str(root / "pr_heads"), "STATES": str(root / "states"),
-                   "CALLS": str(root / "calls"), "SLEEPS": str(root / "sleeps")}
+                   "CALLS": str(root / "calls"), "SLEEPS": str(root / "sleeps"), "RERUN_RC": str(rerun_rc)}
             result = subprocess.run(["bash", "-e", "-c", self.GH_STUB + self.script()], cwd=root,
                                     env=env, capture_output=True, text=True)
             return result, (root / "calls").read_text().splitlines(), (root / "sleeps").read_text().splitlines()
@@ -1186,14 +1196,15 @@ class GateRefreshWorkflow(unittest.TestCase):
 
     def test_selects_only_runs_of_this_pr_newest_first(self):
         runs = [self.run_obj(2), self.run_obj(5, pr=8, branch="other"),       # another PR sharing the commit
-                self.run_obj(4, event="pull_request_review"), self.run_obj(3)]
+                self.run_obj(4, event="pull_request_review"), self.run_obj(3),
+                {**self.run_obj(6), "head_sha": "b" * 40}]
         result, calls, _ = self.execute(runs=runs)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.reruns(calls), ["run rerun 3 --repo o/r --job 21"])
 
-    def test_fork_runs_without_pull_requests_match_on_head_repository_and_branch(self):
-        fork = self.run_obj(3, pr=None, repo="someone/fork", branch="feature")
-        decoy = self.run_obj(4, pr=None, repo="someone/fork", branch="elsewhere")
+    def test_fork_runs_sharing_a_head_match_only_the_exact_pr_title(self):
+        fork = self.run_obj(3, pr=None, repo="someone/fork", title="quality-gate for PR #7")
+        decoy = self.run_obj(4, pr=None, repo="someone/fork", title="quality-gate for PR #8")
         result, calls, _ = self.execute(runs=[fork, decoy], head_repo="someone/fork")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.reruns(calls), ["run rerun 3 --repo o/r --job 21"])
@@ -1201,6 +1212,35 @@ class GateRefreshWorkflow(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("::notice title=No PR gate run yet::", result.stdout)
         self.assertEqual(self.reruns(calls), [])
+
+    def test_fork_run_with_missing_or_inexact_title_is_not_selected(self):
+        for title in (None, "The PR title", "quality-gate for PR #8", "quality-gate for PR #70",
+                      "quality-gate for PR #7 extra", "quality-gate for PR #7\n"):
+            with self.subTest(title=title):
+                run = self.run_obj(3, pr=None, repo="someone/fork", title=title)
+                result, calls, _ = self.execute(runs=[run], head_repo="someone/fork")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("::notice title=No PR gate run yet::", result.stdout)
+                self.assertEqual(self.reruns(calls), [])
+
+    def test_fork_title_cannot_override_head_repository_branch_or_pr_list(self):
+        for overrides in ({"repo": "other/fork"}, {"branch": "elsewhere"},
+                          {"repo": "other/fork", "branch": "elsewhere"}, {"pr": 8}):
+            with self.subTest(overrides=overrides):
+                fields = {"pr": None, "repo": "someone/fork", "title": "quality-gate for PR #7", **overrides}
+                result, calls, _ = self.execute(runs=[self.run_obj(3, **fields)], head_repo="someone/fork")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("::notice title=No PR gate run yet::", result.stdout)
+                self.assertEqual(self.reruns(calls), [])
+
+    def test_refused_rerun_fails_with_actionable_annotation(self):
+        result, calls, _ = self.execute(rerun_rc=1)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(self.reruns(calls), ["run rerun 2 --repo o/r --job 21"])
+        self.assertIn("::error title=Gate re-run refused::", result.stdout)
+        self.assertIn("quality-gate.yml run 2", result.stdout)
+        self.assertIn("push a commit or close and reopen PR #7 to start a fresh gate run", result.stdout)
+        self.assertNotIn("Re-running quality-gate job", result.stdout)
 
     def test_cancelled_run_is_superseded_and_not_rerun(self):
         result, calls, _ = self.execute(states=["completed cancelled"])
@@ -1282,6 +1322,7 @@ class GateLiveBase(unittest.TestCase):
 class PublishReruns(unittest.TestCase):
     SHA = "a" * 40
     PR = {"number": 4, "head": {"sha": "a" * 40, "ref": "feature", "repo": {"full_name": "o/r"}}}
+    FORK_PR = {"number": 7, "head": {"sha": "a" * 40, "ref": "feature", "repo": {"full_name": "x/fork"}}}
 
     def run_data(self, id=2, **overrides):
         return {"id": id, "event": "pull_request", "head_sha": self.SHA,
@@ -1306,12 +1347,31 @@ class PublishReruns(unittest.TestCase):
         ours = self.run_data(2)
         other_pr = self.run_data(3, pull_requests=[{"number": 9}], head_branch="other")
         self.assertIs(evidence_comment.select_gate_run([ours, other_pr], self.SHA, self.PR), ours)
-        fork_pr = {"number": 4, "head": {"sha": self.SHA, "ref": "feature", "repo": {"full_name": "x/fork"}}}
-        fork_run = self.run_data(2, pull_requests=[], head_repository={"full_name": "x/fork"})
-        other_branch = self.run_data(3, pull_requests=[], head_repository={"full_name": "x/fork"}, head_branch="b")
-        self.assertIs(evidence_comment.select_gate_run([fork_run, other_branch], self.SHA, fork_pr), fork_run)
-        gone = {"number": 4, "head": {"sha": self.SHA, "ref": "feature", "repo": None}}
+
+    def test_fork_runs_sharing_a_head_match_only_the_exact_pr_title(self):
+        fork_run = self.run_data(2, pull_requests=[], head_repository={"full_name": "x/fork"},
+                                 display_title="quality-gate for PR #7")
+        other_pr = {**fork_run, "id": 3, "created_at": self.run_data(3)["created_at"],
+                    "display_title": "quality-gate for PR #8"}
+        self.assertIs(evidence_comment.select_gate_run([fork_run, other_pr], self.SHA, self.FORK_PR), fork_run)
+        gone = {"number": 7, "head": {"sha": self.SHA, "ref": "feature", "repo": None}}
         self.assertIsNone(evidence_comment.select_gate_run([fork_run], self.SHA, gone))
+
+    def test_fork_run_with_missing_or_inexact_title_is_not_selected(self):
+        for title in (None, "The PR title", "quality-gate for PR #8", "quality-gate for PR #70",
+                      "quality-gate for PR #7 extra", "quality-gate for PR #7\n"):
+            with self.subTest(title=title):
+                run = self.run_data(pull_requests=[], head_repository={"full_name": "x/fork"}, display_title=title)
+                self.assertIsNone(evidence_comment.select_gate_run([run], self.SHA, self.FORK_PR))
+
+    def test_fork_title_cannot_override_head_repository_branch_or_pr_list(self):
+        fork_run = self.run_data(pull_requests=[], head_repository={"full_name": "x/fork"},
+                                 display_title="quality-gate for PR #7")
+        for overrides in ({"head_repository": {"full_name": "other/fork"}}, {"head_branch": "elsewhere"},
+                          {"head_repository": {"full_name": "other/fork"}, "head_branch": "elsewhere"},
+                          {"pull_requests": [{"number": 8}]}):
+            with self.subTest(overrides=overrides):
+                self.assertIsNone(evidence_comment.select_gate_run([{**fork_run, **overrides}], self.SHA, self.FORK_PR))
 
     def test_selection_uses_id_to_break_creation_time_ties_and_ignores_conclusion(self):
         for conclusion in ("success", "failure", "cancelled", "timed_out", "skipped", None):
@@ -1319,11 +1379,12 @@ class PublishReruns(unittest.TestCase):
                 newer = self.run_data(3, created_at=self.run_data()["created_at"], conclusion=conclusion)
                 self.assertIs(evidence_comment.select_gate_run([newer, self.run_data()], self.SHA, self.PR), newer)
 
-    def refresh_mocks(self, stack, *, runs=None, statuses=("completed",), conclusion="success", live=None, jobs=None):
+    def refresh_mocks(self, stack, *, runs=None, statuses=("completed",), conclusion="success", live=None, jobs=None,
+                      rerun_error=None):
         pages = [{"workflow_runs": []}, {"workflow_runs": runs if runs is not None else [self.run_data()]}]
         jobs = jobs if jobs is not None else [{"id": 21, "name": "quality-gate", "conclusion": "success"}]
         calls = stack.enter_context(mock.patch.object(evidence_comment.qlib, "sh", side_effect=[
-            json.dumps(pages), json.dumps([{"jobs": [{"id": 20, "name": "checks"}]}, {"jobs": jobs}]), ""]))
+            json.dumps(pages), json.dumps([{"jobs": [{"id": 20, "name": "checks"}]}, {"jobs": jobs}]), rerun_error or ""]))
         polled = [{"status": status, "conclusion": conclusion if status == "completed" else None} for status in statuses]
         api = stack.enter_context(mock.patch.object(evidence_comment, "gh", side_effect=[
             *polled, {"head": {"sha": live or self.SHA}}]))
@@ -1355,6 +1416,20 @@ class PublishReruns(unittest.TestCase):
             evidence_comment.refresh_gate("o/r", self.SHA, self.PR)
             self.assertIn("superseded", output.getvalue())
             self.assertEqual(calls.call_count, 1)
+
+    def test_refused_rerun_fails_with_actionable_message(self):
+        with contextlib.ExitStack() as stack:
+            error = SystemExit("command failed (1): gh run rerun 2 --repo o/r --job 21\nrun is older than 30 days")
+            calls, _, _ = self.refresh_mocks(stack, rerun_error=error)
+            output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            with self.assertRaises(SystemExit) as raised:
+                evidence_comment.refresh_gate("o/r", self.SHA, self.PR)
+            message = str(raised.exception)
+            self.assertIn("evidence_comment: GitHub refused to re-run quality-gate.yml run 2", message)
+            self.assertIn("push a commit or close and reopen PR #4 to start a fresh gate run", message)
+            self.assertIn(str(error), message)
+            self.assertEqual(calls.call_args, mock.call("gh", "run", "rerun", "2", "--repo", "o/r", "--job", "21"))
+            self.assertNotIn("re-running quality-gate job", output.getvalue())
 
     def test_head_moving_while_waiting_skips_the_stale_rerun(self):
         with contextlib.ExitStack() as stack:
