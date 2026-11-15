@@ -24,13 +24,21 @@
 #   "local" the loop runs on a developer's machine; evidence_comment.py publishes its evidence to
 #           the PR, and the quality-gate job verifies it against the head commit. No secrets.
 # The `checks` job runs on [ci].runs_on after [ci].setup, both from the base policy.
+# PR events (including pushes) and merge_group start this workflow. Reviews submitted or
+# dismissed run the permission-less relay quality-gate-review.yml, which triggers
+# quality-gate-refresh.yml (workflow_run, default branch, write token even for fork PRs). The
+# refresh waits for this PR's newest run for the head to complete and re-runs only its
+# quality-gate job, whatever its conclusion, unless the run was cancelled or the head moved.
+# Local evidence publish does the same; publish --approve delegates to the review event.
+# A re-run keeps the original event, so the gate job re-reads the PR's live base and its policy.
+# The ruleset still requires only `checks` and `quality-gate`.
 name: quality-gate
+# Fork runs omit pull_requests, so refresh needs the PR in the title; quotes keep ' #' from starting a YAML comment.
+run-name: "${{ github.event_name == 'pull_request' && format('quality-gate for PR #{0}', github.event.pull_request.number) || github.workflow }}"
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, labeled]
-  pull_request_review:
-    types: [submitted, dismissed]
   merge_group:
 
 # Least privilege. No job writes a commit status: the quality-gate job's own result is the verdict.
@@ -39,10 +47,9 @@ on:
 permissions:
   contents: read
 
-# One group per event kind. An approval (pull_request_review) must never cancel the review run
-# (pull_request) whose evidence it needs; a new push still cancels the now-stale review.
+# One group per PR (or merge-queue ref); a new push cancels the now-stale run.
 concurrency:
-  group: quality-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: quality-gate-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -73,9 +80,8 @@ jobs:
           python3 $RUNNER_TEMP/trusted/code_quality/scripts/ci_policy.py $RUNNER_TEMP/trusted/quality.toml | grep -v '^bootstrap=' >> "$GITHUB_OUTPUT"
 
   checks:
-    # Deterministic gates: on every push, on every review event (a skipped required job would count as
-    # passing, and the approval status must never be computed without them), and again in the merge
-    # queue against the latest main with the change applied.
+    # Deterministic gates: on every PR event, and again in the merge queue against the latest main
+    # with the change applied. A gate refresh retains these results from the original PR run.
     needs: policy
     runs-on: ${{ needs.policy.outputs.runs_on }}
     steps:
@@ -147,12 +153,12 @@ jobs:
 
   # Required check #2 (with `checks`). Passes only when the review for THIS head
   # commit has no open blockers and the tier's number of HUMAN approvals exist on
-  # THIS head commit. Re-evaluated whenever a review is submitted or dismissed.
+  # THIS head commit. Reviews and evidence publication re-run this job in the existing PR run.
   quality-gate:
     # The verdict is this job: green when the review and the human sign-off are complete for the head
     # commit, red otherwise. "Waiting for you" is red too, but says so plainly at the top of the check.
-    # Every re-evaluation (push, review submitted or dismissed) creates a new run of this job, so the
-    # required check is pending while it runs and never shows a stale result.
+    # A push starts a new PR run. Review/evidence refreshes re-run this job regardless of its prior
+    # conclusion, so replacement evidence also invalidates a previously passing verdict.
     if: always()
     needs: [policy, checks, review]
     runs-on: ubuntu-latest
@@ -170,9 +176,39 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name != 'merge_group'
         with: { fetch-depth: 0, ref: "${{ github.event.pull_request.head.sha }}", persist-credentials: false }
+      # A refresh re-runs this job with the ORIGINAL event, whose base SHA may be stale: the base can
+      # have changed its policy (reviewers, approval counts) since. Judge against the live base.
+      - name: Live PR base
+        if: github.event_name != 'merge_group'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # The pulls API's base.sha is the base as of the PR's last update, not the branch's tip.
+          BASE_NAME=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.base.ref')
+          BASE_PATH=$(jq -rn --arg r "$BASE_NAME" '$r | split("/") | map(@uri) | join("/")')
+          LIVE_BASE=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$BASE_PATH" --jq '.object.sha')
+          if [[ ! "$LIVE_BASE" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=Unknown PR base::Could not read the base commit of PR #$PR."
+            exit 1
+          fi
+          if ! git cat-file -e "$LIVE_BASE^{commit}" 2>/dev/null; then
+            echo "::error title=Base commit not in the checkout::The PR's base is now $LIVE_BASE; re-run all jobs so the run starts from it."
+            exit 1
+          fi
+          if [ "$LIVE_BASE" != "$BASE_REF" ]; then
+            echo "::notice title=Base moved::This run started on base ${BASE_REF:0:10}; the gate judges against the live base ${LIVE_BASE:0:10}."
+          fi
+          echo "LIVE_BASE=$LIVE_BASE" >> "$GITHUB_ENV"
       - name: Trusted kit from base branch (a PR that installs or upgrades the gate stops here)
         if: github.event_name != 'merge_group'
+        env:
+          BASE_REF: ${{ env.LIVE_BASE }}
+          RUN_REVIEW_WHERE: ${{ needs.policy.outputs.review_where }}
         run: |
+          # Never stage from anything but a full commit SHA (an empty ref would read the PR's index).
+          [[ "$BASE_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "::error title=No live base::BASE_REF is not a commit SHA."; exit 1; }
           eval "$TRUSTED_KIT_FN"; trusted_kit
           # Checked in the staging step itself, before any staged script runs: on a bootstrap PR those
           # scripts are the PR's own, so nothing they report can be trusted, including "not bootstrap".
@@ -180,10 +216,20 @@ jobs:
             echo "::error title=Installs or upgrades the quality gate::$(cat $RUNNER_TEMP/trusted/BOOTSTRAP). The gate cannot judge a change to itself: read the evidence and merge deliberately (admin bypass)."
             exit 1
           fi
+          # The earlier jobs of this run followed the policy at the run's original base. If the live
+          # base moved reviews elsewhere, their outputs no longer apply: fail closed.
+          live_where=$(python3 $RUNNER_TEMP/trusted/code_quality/scripts/ci_policy.py $RUNNER_TEMP/trusted/quality.toml | sed -n 's/^review_where=//p')
+          if [ "$live_where" != "$RUN_REVIEW_WHERE" ]; then
+            echo "::error title=Base policy changed::[review].where is '$live_where' on the live base but this run used '$RUN_REVIEW_WHERE'. Re-run all jobs (or push) so the whole run follows the current policy."
+            exit 1
+          fi
           cp $RUNNER_TEMP/trusted/quality.toml quality.toml
       - name: Fresh evidence directory
         if: github.event_name != 'merge_group'
         run: |
+          # The classifier writes .quality/risk.json in the checkout. Remove planted files and
+          # symlinks before it runs, so that write cannot be redirected into the trusted kit.
+          rm -rf .quality
           # The checkout may contain planted evidence. Only trusted fetch/download steps fill this
           # new directory, including on re-runs where evidence for the head may not exist yet.
           EVIDENCE_DIR=$(mktemp -d "$RUNNER_TEMP/quality-evidence.XXXXXX")
@@ -191,18 +237,6 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: github.event_name == 'pull_request' && needs.policy.outputs.review_where == 'ci' && needs.review.result == 'success'
         with: { name: quality-evidence, path: "${{ env.EVIDENCE_DIR }}" }
-      - name: Evidence from this head's latest review run (approval events, ci mode)
-        if: github.event_name == 'pull_request_review' && needs.policy.outputs.review_where == 'ci'
-        env: { GH_TOKEN: "${{ github.token }}" }
-        run: |
-          RUN=$(gh run list --workflow quality-gate.yml --commit "${{ github.event.pull_request.head.sha }}" \
-                --event pull_request --json databaseId,status,conclusion \
-                -q '[.[] | select(.status=="completed" and .conclusion!="cancelled")][0].databaseId')
-          if [ -z "$RUN" ]; then
-            echo "::error title=Waiting for the review run::The review for this commit has not finished yet. When it has, re-run this job."
-            exit 1
-          fi
-          gh run download "$RUN" -n quality-evidence -D "$EVIDENCE_DIR"
       - name: Evidence published from a local review (local mode)
         if: github.event_name != 'merge_group' && needs.policy.outputs.review_where == 'local'
         env: { GH_TOKEN: "${{ github.token }}" }
@@ -212,9 +246,27 @@ jobs:
             || [ $? -eq 3 ]   # 3 = no evidence yet: Enforce says "waiting for you"
       - name: Enforce
         if: github.event_name != 'merge_group'
-        env: { GH_TOKEN: "${{ github.token }}" }
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ env.LIVE_BASE }}   # tier floor and approvals from the live base's policy
         run: |
-          : "${EVIDENCE_DIR:?Missing evidence directory}"
+          set -euo pipefail
+          status=0
+          item() {
+            local kind="$1" title="$2" message="$3" mark icon
+            case "$kind" in
+              ok) mark=x; icon=✅ ;;
+              info) mark=x; icon=ℹ️ ;;
+              failure) mark=' '; icon=❌; status=1 ;;
+              waiting) mark=' '; icon=⏳; status=1 ;;
+              *) exit 1 ;;
+            esac
+            printf -- '- [%s] %s %s: %s\n' "$mark" "$icon" "$title" "$message" >> "$GITHUB_STEP_SUMMARY"
+            case "$kind" in
+              failure|waiting) echo "::error title=$icon $title::$message" ;;
+              info) echo "::notice title=$icon $title::$message" ;;
+            esac
+          }
           if [ "${{ needs.policy.outputs.review_where }}" = "local" ]; then
             WAIT="Run: python3 code_quality/scripts/evidence_comment.py publish --pr ${{ github.event.pull_request.number }} --approve"
             MISSING="Review it locally, then $WAIT"
@@ -222,27 +274,52 @@ jobs:
             WAIT="Approve PR #${{ github.event.pull_request.number }} on head commit ${{ github.event.pull_request.head.sha }} (or submit a /director-approve review on that commit when the director rule applies)."
             MISSING="Wait for the CI review run to finish, then re-run this job."
           fi
-          if [ "${{ needs.checks.result }}" != "success" ]; then   # every event: checks ran in this run
-            echo "::error title=Checks failed::The deterministic checks failed for this commit."; exit 1
+          if [ "${{ needs.checks.result }}" != "success" ]; then   # checks belong to this PR run
+            item failure "Checks failed" "The deterministic checks failed for this commit."
+          else
+            item ok "Deterministic checks" "Passed for this commit."
           fi
-          if [ "${{ needs.policy.outputs.review_where }}" = "ci" ] && [ "${{ github.event_name }}" = "pull_request" ] \
-             && [ "${{ needs.review.result }}" != "success" ]; then
-            echo "::error title=Review job failed::The CI review job ended with '${{ needs.review.result }}'."; exit 1
+          if [ "${{ needs.policy.outputs.review_where }}" = "ci" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
+            if [ "${{ needs.review.result }}" != "success" ]; then
+              item failure "Review job failed" "The CI review job ended with '${{ needs.review.result }}'."
+            else
+              item ok "CI review job" "Passed for this commit."
+            fi
           fi
-          if [ ! -f "$EVIDENCE_DIR/review-head.json" ]; then
-            echo "::error title=⏳ Waiting for you (not a failure in the code)::No review evidence for this commit yet. $MISSING"
-            exit 1
+          # Informational deterministic tier, independent of whether review evidence exists.
+          # Read stdout, never a possibly stale risk file left by an unsuccessful classifier.
+          if risk_json=$(python3 $RUNNER_TEMP/trusted/code_quality/scripts/classify_risk.py --base "$BASE_REF" --config $RUNNER_TEMP/trusted/quality.toml) \
+             && risk_info=$(printf '%s\n' "$risk_json" | python3 -I -c '
+          import json, sys
+          risk = json.load(sys.stdin)
+          tier, approvals = risk["tier"], risk["approvals_required"]
+          if type(tier) is not int or tier not in (0, 1, 2) or type(approvals) is not int or approvals < 0:
+              raise ValueError("Invalid risk tier or approval requirement")
+          print(f"Tier {tier}; trusted policy requires {approvals} human approval(s).")
+          '); then
+            item info "Risk" "$risk_info"
+          else
+            item failure "Risk classification failed" "Could not determine the tier and required approvals; see the log above."
           fi
-          # The tier is re-derived from the base policy (floor = path rules on this diff); the published
-          # risk.json may only raise it, and approvals_required in it is ignored.
-          set +e
-          python3 $RUNNER_TEMP/trusted/code_quality/scripts/approval_gate.py --pr ${{ github.event.pull_request.number }} \
-            --base "$BASE_REF" --config $RUNNER_TEMP/trusted/quality.toml \
-            --risk "$EVIDENCE_DIR/risk.json" --review "$EVIDENCE_DIR/review-head.json"
-          rc=$?
-          set -e
-          case $rc in
-            0) ;;
-            3) echo "::error title=⏳ Waiting for your sign-off (not a failure in the code)::$WAIT"; exit 1 ;;
-            *) exit 1 ;;
-          esac
+          if [ -z "${EVIDENCE_DIR:-}" ]; then
+            item failure "Missing evidence directory" "EVIDENCE_DIR is unset or empty."
+          elif [ ! -f "$EVIDENCE_DIR/review-head.json" ]; then
+            item waiting "Waiting for you (not a failure in the code)" "No review evidence for this commit yet. $MISSING"
+          else
+            item ok "Review evidence" "Present for evaluation."
+            # The tier is re-derived from the base policy (floor = path rules on this diff); the published
+            # risk.json may only raise it, and approvals_required in it is ignored.
+            if python3 $RUNNER_TEMP/trusted/code_quality/scripts/approval_gate.py --pr ${{ github.event.pull_request.number }} \
+              --base "$BASE_REF" --config $RUNNER_TEMP/trusted/quality.toml \
+              --risk "$EVIDENCE_DIR/risk.json" --review "$EVIDENCE_DIR/review-head.json"; then
+              rc=0
+            else
+              rc=$?
+            fi
+            case $rc in
+              0) item ok "Review approved" "Review and required approvals passed." ;;
+              3) item waiting "Waiting for your sign-off (not a failure in the code)" "$WAIT" ;;
+              *) item failure "Review blocked" "review blocked: see the log above" ;;
+            esac
+          fi
+          exit "$status"

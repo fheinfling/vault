@@ -1,0 +1,21 @@
+# Relay for review events. pull_request_review runs the PR's copy of this file and, on fork PRs,
+# with a read-only token, so this workflow holds no permissions and does nothing but name the PR
+# and head commit in its run title. quality-gate-refresh.yml (workflow_run, default branch) reads
+# that title as untrusted input, checks it against the live PR, and re-runs the gate.
+name: quality-gate-review
+# Quoted: unquoted, YAML would read ' #' as the start of a comment and truncate the title.
+run-name: "quality-gate review event for PR #${{ github.event.pull_request.number }} at ${{ github.event.pull_request.head.sha }}"
+
+on:
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions: {}
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Hand the review event to quality-gate-refresh.yml
+        run: echo "Review event recorded; quality-gate-refresh.yml re-evaluates the gate from the default branch."

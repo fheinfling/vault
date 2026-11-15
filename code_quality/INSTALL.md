@@ -38,9 +38,11 @@ python3 /path/to/code_quality/install.py . --profile solo   # or team
 
 It copies the kit, creates `quality.toml`, `AGENTS.md`, `CLAUDE.md`, `REVIEW.md`, the
 PR template (and CODEOWNERS for team) only where missing, installs the three subagents
-and the workflow, adds `.quality/` to `.gitignore`, and merges the hooks and deny rules
+and the three workflows, adds `.quality/` to `.gitignore`, and merges the hooks and deny rules
 into `.claude/settings.json`. It prints what it did, what it left alone, and the
 checklist below. Re-running it later updates the kit without touching your files.
+The kit owns `.github/workflows/quality-gate.yml`, `quality-gate-review.yml` and
+`quality-gate-refresh.yml`; all three are overwritten on update.
 Commit: `git add -A && git commit -m "quality kit: install (mechanical)"`.
 
 ## 2. Make `quality.toml` true for this repo
@@ -99,6 +101,17 @@ The last line is the sanity check that the floors work: your install branch edit
 quality system, so it must classify as Tier 2.
 
 ## 6. GitHub
+
+Pushes trigger `quality-gate.yml` through `pull_request`; it also handles `merge_group`.
+A review submitted or dismissed runs `quality-gate-review.yml`, a relay with no permissions (review events run the PR's copy of a workflow, read-only on fork PRs) that only names the PR and head commit in its run title. That completion triggers `quality-gate-refresh.yml` through `workflow_run`, which always runs the default branch's copy with `contents: read`, `actions: write` and `pull-requests: read` (for the pulls API), fork PRs included, using only `gh` and `jq` with no checkout or repository code. It accepts the title only in the exact expected form and only for a PR whose live head is that commit, selects that PR's newest `pull_request` run for the head (GitHub's non-empty `pull_requests` must contain the PR; fork runs with an empty list need the exact `quality-gate for PR #N` title plus the PR's head repository and branch), polls every 15 seconds for up to 20 minutes until it completes, then re-runs only its `quality-gate` job, whatever its verdict. It skips the re-run with a notice when the run was cancelled or the head moved meanwhile: re-running a stale run would cancel the new head's run through the shared concurrency group, and the new run reads the review itself. A re-run keeps the original event, so the gate job re-reads the PR's live base and stages the policy from it; if `[review].where` changed, it fails closed and asks for a full re-run. `evidence_comment.py publish` performs the same refresh (same PR scoping and skips) after
+posting evidence; with `--approve`, the review event handles it. The refresh only exists once
+`quality-gate-refresh.yml` is on the default branch (`workflow_run` reads it from there).
+No existing run means a notice and success: the PR run will read the review/evidence
+when it runs. A timeout fails with an error.
+Fork runs predating the PR-specific title are skipped with a notice. If GitHub refuses
+a re-run (for example, after 30 days), refresh fails and names the run; push a commit
+or close and reopen the PR to start a fresh gate run. The ruleset still requires `checks` and
+`quality-gate`, with no additional required check for the relay or refresh workflow.
 
 What you can do with `gh` (needs push access, not admin):
 

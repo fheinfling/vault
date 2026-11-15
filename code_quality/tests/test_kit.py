@@ -342,8 +342,12 @@ class InstallerTests(unittest.TestCase):
             for rel in ("code_quality/scripts/cross_review.py", "code_quality/install.py", "quality.toml", "AGENTS.md",
                         "CLAUDE.md", "REVIEW.md", ".claude/agents/bug-hunter.md", ".claude/agents/verifier.md",
                         ".claude/agents/risk-classifier.md", ".github/workflows/quality-gate.yml",
+                        ".github/workflows/quality-gate-review.yml", ".github/workflows/quality-gate-refresh.yml",
                         ".github/PULL_REQUEST_TEMPLATE.md", ".claude/settings.json", ".gitignore"):
                 self.assertTrue((r.path / rel).exists(), rel)
+            for name in ("quality-gate.yml", "quality-gate-review.yml", "quality-gate-refresh.yml"):
+                self.assertEqual((r.path / ".github/workflows" / name).read_bytes(),
+                                 (KIT / "ci" / name).read_bytes())
             self.assertFalse((r.path / ".github" / "CODEOWNERS").exists(), "solo profile does not install CODEOWNERS")
             with open(r.path / "quality.toml", "rb") as fh:
                 self.assertEqual(tomllib.load(fh)["risk"]["approvals"]["t2"], 1)
@@ -379,7 +383,14 @@ class InstallerTests(unittest.TestCase):
                 old.write_text("{}\n")
             stale = r.path / "code_quality" / "scripts" / "old_script.py"
             stale.write_text("# removed upstream\n")
+            # Upgrade an install that predates the relay and refresh workflows.
+            (r.path / ".github/workflows/quality-gate-refresh.yml").unlink()
+            (r.path / ".github/workflows/quality-gate-review.yml").unlink()
+            (r.path / ".github/workflows/quality-gate.yml").write_text("# old workflow\n")
             self.install(r.path, "team")
+            for name in ("quality-gate.yml", "quality-gate-review.yml", "quality-gate-refresh.yml"):
+                self.assertEqual((r.path / ".github/workflows" / name).read_bytes(),
+                                 (KIT / "ci" / name).read_bytes())
             self.assertEqual((r.path / "CLAUDE.md").read_text(), "# my repo rules\n")
             self.assertEqual((r.path / "quality.toml").read_text(), 'version = 1\n[checks]\nfast = ["true"]\nfull = ["true"]\n')
             self.assertEqual((r.path / ".gitignore").read_text().count(".quality/"), 1)
@@ -389,6 +400,13 @@ class InstallerTests(unittest.TestCase):
             for name in install.internal_cases():
                 self.assertFalse((r.path / "code_quality" / "evals" / "cases" / name).exists(), name)
             self.assertTrue((r.path / ".github" / "CODEOWNERS").exists())
+
+    def test_update_overwrites_the_kit_owned_refresh_workflow(self):
+        with TempRepo() as r:
+            r.write(".github/workflows/quality-gate-refresh.yml", "# old refresh workflow\n")
+            self.install(r.path, "solo")
+            self.assertEqual((r.path / ".github/workflows/quality-gate-refresh.yml").read_bytes(),
+                             (KIT / "ci/quality-gate-refresh.yml").read_bytes())
 
     def test_settings_merge_keeps_existing_and_is_idempotent(self):
         kit = json.loads((KIT / "hooks" / "settings.json").read_text())
@@ -708,23 +726,149 @@ class GateHardening(unittest.TestCase):
         step = step.split("\n      - ", 1)[0]
         return textwrap.dedent(step.split("        run: |\n", 1)[1])
 
-    def enforce(self, root, mode):
-        values = {"needs.policy.outputs.review_where": mode, "needs.checks.result": "success",
-                  "needs.review.result": "success", "github.event_name": "pull_request",
+    def enforce(self, root, mode, *, checks="success", review="success", event="pull_request",
+                gate_rc=3, risk_rc=0, risk_output=None, env_overrides=None):
+        values = {"needs.policy.outputs.review_where": mode, "needs.checks.result": checks,
+                  "needs.review.result": review, "github.event_name": event,
                   "github.event.pull_request.number": "4", "github.event.pull_request.head.sha": "a" * 40}
         script = re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda m: values[m[1]], self.step_script("Enforce"))
-        # No network or real gate: capture the trusted script invocation and simulate missing approval.
-        stub = 'python3() { printf "%s\\n" "$@" > "$GATE_CALLS"; return 3; }\n'
+        # Stub only the external verdicts; execute the real shell and inline JSON parser.
+        stub = r'''
+        python3() {
+          case "$1" in
+            */classify_risk.py)
+              printf '%s\n' "$@" > "$RISK_CALLS"
+              printf '%s\n' "$RISK_OUTPUT"
+              return "$RISK_RC" ;;
+            */approval_gate.py)
+              printf '%s\n' "$@" > "$GATE_CALLS"
+              return "$GATE_RC" ;;
+            *) command python3 "$@" ;;
+          esac
+        }
+        '''
+        (root / "summary").write_text("")
+        env = {**os.environ, "RUNNER_TEMP": str(root / "runner"), "BASE_REF": "base",
+               "EVIDENCE_DIR": str(root / "runner" / "evidence"),
+               "GITHUB_STEP_SUMMARY": str(root / "summary"),
+               "GATE_CALLS": str(root / "calls"), "GATE_RC": str(gate_rc),
+               "RISK_CALLS": str(root / "risk-calls"), "RISK_RC": str(risk_rc),
+               "RISK_OUTPUT": risk_output if risk_output is not None else
+               json.dumps({"tier": 2, "approvals_required": 2})}
+        env.update(env_overrides or {})
+        env = {key: value for key, value in env.items() if value is not None}
         return subprocess.run(["bash", "-e", "-c", stub + script], cwd=root / "checkout",
-                              env={**os.environ, "RUNNER_TEMP": str(root / "runner"), "BASE_REF": "base",
-                                   "EVIDENCE_DIR": str(root / "runner" / "evidence"),
-                                   "GATE_CALLS": str(root / "calls")}, capture_output=True, text=True)
+                              env=env, capture_output=True, text=True)
+
+    def test_enforce_reports_all_problems_in_order_without_early_exit(self):
+        with tempfile.TemporaryDirectory(prefix="kit-test-enforce-") as tmp:
+            root = Path(tmp)
+            (root / "checkout").mkdir()
+            evidence = root / "runner" / "evidence"
+            evidence.mkdir(parents=True)
+            for present in (False, True):
+                with self.subTest(evidence=present):
+                    if present:
+                        (evidence / "review-head.json").write_text("{}")
+                    result = self.enforce(root, "ci", checks="failure", review="failure", gate_rc=1)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    rows = (root / "summary").read_text().splitlines()
+                    self.assertIn("❌ Checks failed", rows[0])
+                    self.assertIn("❌ Review job failed", rows[1])
+                    self.assertIn("ℹ️ Risk: Tier 2; trusted policy requires 2 human approval(s).", rows[2])
+                    if present:
+                        self.assertIn("✅ Review evidence", rows[3])
+                        self.assertIn("❌ Review blocked: review blocked: see the log above", rows[4])
+                        self.assertTrue((root / "calls").exists())
+                    else:
+                        self.assertIn("⏳ Waiting for you", rows[3])
+                        self.assertIn("Wait for the CI review run to finish, then re-run this job.", rows[3])
+                        self.assertFalse((root / "calls").exists())
+                    self.assertEqual(len(rows), 5 if present else 4)
+                    self.assertTrue(all(row.startswith(("- [x] ", "- [ ] ")) for row in rows))
+                    annotations = [line for line in result.stdout.splitlines() if line.startswith("::error")]
+                    self.assertEqual(len(annotations), 3)
+                    self.assertIn("::error title=❌ Checks failed::", annotations[0])
+                    self.assertIn("::error title=❌ Review job failed::", annotations[1])
+                    self.assertTrue(annotations[2].startswith(
+                        "::error title=❌" if present else
+                        "::error title=⏳ Waiting for you (not a failure in the code)::"))
+                    self.assertEqual((root / "risk-calls").read_text().splitlines(), [
+                        str(root / "runner/trusted/code_quality/scripts/classify_risk.py"),
+                        "--base", "base", "--config", str(root / "runner/trusted/quality.toml")])
+
+    def test_enforce_risk_errors_do_not_hide_evidence_or_verdict(self):
+        with tempfile.TemporaryDirectory(prefix="kit-test-enforce-") as tmp:
+            root = Path(tmp)
+            (root / "checkout").mkdir()
+            evidence = root / "runner/evidence"
+            evidence.mkdir(parents=True)
+            for present in (False, True):
+                if present:
+                    (evidence / "review-head.json").write_text("{}")
+                for risk_rc, output in [(1, None), (127, None), (0, "not json"), (0, "{}"),
+                                        (0, '{"tier": 9, "approvals_required": 0}')]:
+                    with self.subTest(present=present, rc=risk_rc, output=output):
+                        result = self.enforce(root, "local", risk_rc=risk_rc, risk_output=output, gate_rc=0)
+                        self.assertEqual(result.returncode, 1, result.stderr)
+                        summary = (root / "summary").read_text()
+                        self.assertIn("❌ Risk classification failed", summary)
+                        self.assertIn("::error title=❌ Risk classification failed::", result.stdout)
+                        self.assertIn("✅ Review approved" if present else "⏳ Waiting for you", summary)
+                        if not present:
+                            self.assertIn("Review it locally, then Run:", summary)
+                            self.assertIn("evidence_comment.py publish --pr 4 --approve", summary)
+
+    def test_enforce_approval_exit_codes_and_applicable_review_job(self):
+        with tempfile.TemporaryDirectory(prefix="kit-test-enforce-") as tmp:
+            root = Path(tmp)
+            (root / "checkout").mkdir()
+            evidence = root / "runner/evidence"
+            evidence.mkdir(parents=True)
+            (evidence / "review-head.json").write_text("{}")
+            for mode in ("ci", "local"):
+                for rc in (0, 3, 1, 2, 127):
+                    with self.subTest(mode=mode, rc=rc):
+                        review_applies = mode == "ci"
+                        result = self.enforce(root, mode, gate_rc=rc,
+                                              review="success" if review_applies else "skipped")
+                        self.assertEqual(result.returncode, 0 if rc == 0 else 1, result.stderr)
+                        summary = (root / "summary").read_text()
+                        self.assertIn("✅ Deterministic checks", summary)
+                        self.assertEqual("✅ CI review job" in summary, review_applies)
+                        expected = {0: "✅ Review approved", 3: "⏳ Waiting for your sign-off"}.get(
+                            rc, "❌ Review blocked")
+                        self.assertIn(expected, summary)
+                        self.assertEqual(result.stdout.count("::error"), 0 if rc == 0 else 1)
+                        args = (root / "calls").read_text().splitlines()
+                        self.assertEqual(args, [str(root / "runner/trusted/code_quality/scripts/approval_gate.py"),
+                                               "--pr", "4", "--base", "base", "--config",
+                                               str(root / "runner/trusted/quality.toml"),
+                                               "--risk", str(evidence / "risk.json"),
+                                               "--review", str(evidence / "review-head.json")])
+
+    def test_enforce_fails_closed_on_missing_environment_or_summary_write_error(self):
+        with tempfile.TemporaryDirectory(prefix="kit-test-enforce-") as tmp:
+            root = Path(tmp)
+            (root / "checkout").mkdir()
+            evidence = root / "runner/evidence"
+            evidence.mkdir(parents=True)
+            (evidence / "review-head.json").write_text("{}")
+            for value in (None, ""):
+                with self.subTest(evidence_dir=value):
+                    result = self.enforce(root, "ci", gate_rc=0, env_overrides={"EVIDENCE_DIR": value})
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn("❌ Missing evidence directory", (root / "summary").read_text())
+                    self.assertIn("::error title=❌ Missing evidence directory::", result.stdout)
+                    self.assertFalse((root / "calls").exists())
+            for value in (None, str(root)):
+                with self.subTest(summary=value):
+                    result = self.enforce(root, "ci", gate_rc=0, env_overrides={"GITHUB_STEP_SUMMARY": value})
+                    self.assertNotEqual(result.returncode, 0)
 
     def test_evidence_acquisition_uses_a_fresh_runner_temp_directory(self):
         gate = self.job("quality-gate")
-        self.assertNotIn(".quality", gate)
         self.assertIn('path: "${{ env.EVIDENCE_DIR }}"', gate)
-        self.assertIn('-D "$EVIDENCE_DIR"', gate)
         self.assertIn('--out "$EVIDENCE_DIR"', gate)
         with tempfile.TemporaryDirectory(prefix="kit-test-evidence-") as tmp:
             root = Path(tmp)
@@ -732,13 +876,43 @@ class GateHardening(unittest.TestCase):
             paths = []
             for _ in range(2):
                 subprocess.run(["bash", "-e", "-c", self.step_script("Fresh evidence directory")],
-                               env=env, check=True, capture_output=True, text=True)
+                               cwd=root, env=env, check=True, capture_output=True, text=True)
                 path = Path((root / "env").read_text().splitlines()[-1].removeprefix("EVIDENCE_DIR="))
                 self.assertEqual(path.parent, root)
                 self.assertTrue(path.is_dir())
                 self.assertEqual(list(path.iterdir()), [])
                 paths.append(path)
             self.assertNotEqual(*paths)
+
+    def test_gate_removes_planted_quality_directory_and_symlinks_before_classification(self):
+        gate = self.job("quality-gate")
+        self.assertLess(gate.index("rm -rf .quality"), gate.index("/scripts/classify_risk.py"))
+        with tempfile.TemporaryDirectory(prefix="kit-test-clean-quality-") as tmp:
+            root = Path(tmp)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            trusted = root / "trusted"
+            trusted.mkdir()
+            victim = trusted / "risk.json"
+            victim.write_text("trusted script")
+            planted = checkout / ".quality"
+            for kind in ("directory", "directory_symlink", "file_symlink"):
+                with self.subTest(kind=kind):
+                    if kind == "directory_symlink":
+                        planted.symlink_to(trusted, target_is_directory=True)
+                    else:
+                        planted.mkdir()
+                        if kind == "file_symlink":
+                            (planted / "risk.json").symlink_to(victim)
+                        else:
+                            (planted / "risk.json").write_text("planted evidence")
+                    subprocess.run(["bash", "-e", "-c", self.step_script("Fresh evidence directory")],
+                                   cwd=checkout, env={**os.environ, "RUNNER_TEMP": tmp,
+                                                      "GITHUB_ENV": str(root / "env")},
+                                   check=True, capture_output=True, text=True)
+                    self.assertFalse(planted.exists())
+                    self.assertFalse(planted.is_symlink())
+                    self.assertEqual(victim.read_text(), "trusted script")
 
     def test_enforce_ignores_planted_workspace_evidence(self):
         with tempfile.TemporaryDirectory(prefix="kit-test-evidence-") as tmp:
@@ -791,11 +965,32 @@ class GateHardening(unittest.TestCase):
         for name in ("policy", "checks", "quality-gate"):
             self.assertNotIn("pull-requests: write", self.job(name), name)
 
-    def test_checks_run_on_review_events_and_gate_every_event(self):
-        self.assertNotIn("if: github.event_name != 'pull_request_review'", self.job("checks"))
-        enforce = self.wf()[self.wf().index("- name: Enforce"):]
-        self.assertIn('if [ "${{ needs.checks.result }}" != "success" ]', enforce)
-        self.assertIn("Review job failed", enforce)
+    def test_gate_runs_only_on_pr_and_merge_group_with_one_group_per_pr(self):
+        wf = self.wf()
+        triggers = wf.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+        self.assertEqual(re.findall(r"(?m)^  (\w+):", triggers), ["pull_request", "merge_group"])
+        self.assertIn("types: [opened, synchronize, reopened, ready_for_review, labeled]", triggers)
+        self.assertNotIn("pull_request_review", wf)
+        self.assertNotIn("Evidence from this head's latest review run", wf)
+        concurrency = wf.split("\nconcurrency:\n", 1)[1].split("\nenv:", 1)[0]
+        self.assertEqual(concurrency.strip(),
+                         "group: quality-gate-${{ github.event.pull_request.number || github.ref }}\n"
+                         "  cancel-in-progress: true")
+
+    def test_gate_fails_when_pr_checks_did_not_pass(self):
+        with tempfile.TemporaryDirectory(prefix="kit-test-enforce-") as tmp:
+            root = Path(tmp)
+            (root / "checkout").mkdir()
+            evidence = root / "runner/evidence"
+            evidence.mkdir(parents=True)
+            (evidence / "review-head.json").write_text("{}")
+            for checks in ("failure", "cancelled", "skipped"):
+                with self.subTest(checks=checks):
+                    result = self.enforce(root, "ci", checks=checks, gate_rc=0)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    summary = (root / "summary").read_text()
+                    self.assertIn("❌ Checks failed", summary)
+                    self.assertIn("✅ Review approved", summary)
 
     def test_the_job_is_the_verdict_and_waiting_says_so(self):
         gate = self.job("quality-gate")
@@ -817,7 +1012,7 @@ class GateHardening(unittest.TestCase):
     def test_inline_python_is_isolated(self):
         # Inline Python runs with the PR checkout as cwd; without -I a PR-planted tomllib.py or json.py
         # would be imported instead of the standard library.
-        for path in [KIT / "ci" / "quality-gate.yml", *(KIT / "scripts").glob("*.sh")]:
+        for path in [*(KIT / "ci").glob("*.yml"), *(KIT / "scripts").glob("*.sh")]:
             for line in path.read_text().splitlines():
                 if re.search(r"python3 (-c|-)( |$)", line):
                     self.fail(f"{path.name}: inline python without -I: {line.strip()}")
@@ -836,10 +1031,11 @@ class GateHardening(unittest.TestCase):
             self.assertIn("not empty", res.stderr)
 
     def test_actions_pinned_and_no_persisted_credentials(self):
-        wf = self.wf()
-        for line in re.findall(r"(?m)^\s*(?:-\s*)?uses: (\S+)", wf):
-            self.assertRegex(line, r"@[0-9a-f]{40}$", line)
-        self.assertEqual(wf.count("actions/checkout@"), wf.count("persist-credentials: false"))
+        for path in (KIT / "ci").glob("*.yml"):
+            wf = path.read_text()
+            for line in re.findall(r"(?m)^\s*(?:-\s*)?uses: (\S+)", wf):
+                self.assertRegex(line, r"@[0-9a-f]{40}$", line)
+            self.assertEqual(wf.count("actions/checkout@"), wf.count("persist-credentials: false"))
 
     def test_signoff_is_pinned_to_the_evidenced_commit(self):
         src = (KIT / "scripts" / "evidence_comment.py").read_text()
@@ -848,6 +1044,457 @@ class GateHardening(unittest.TestCase):
 
     def test_loop_never_reviews_an_empty_delta(self):
         self.assertIn('[ "$last_reviewed" != "$(git rev-parse HEAD)" ]', (KIT / "scripts" / "review_loop.sh").read_text())
+
+
+class GateRefreshWorkflow(unittest.TestCase):
+    SHA = "a" * 40
+    TITLE = f"quality-gate review event for PR #7 at {'a' * 40}"
+    GH_STUB = r"""
+        gh() {
+          printf '%s\n' "$*" >> "$CALLS"
+          case " $* " in *" --slurp "*" --jq "*|*" --jq "*" --slurp "*)
+            echo "the \`--slurp\` option is not supported with \`--jq\` or \`--template\`" >&2; return 1 ;; esac
+          next() { local f="$1" n; read -r n < "$f.i"; printf '%s\n' "$((n + 1))" > "$f.i"; sed -n "$((n + 1))p" "$f"; }
+          case "$*" in
+            "api repos/o/r/pulls/7") jq -n --arg sha "$(next "$PR_HEADS")" --arg repo "$HEAD_REPO" --arg ref "$HEAD_REF" \
+                '{head: {sha: $sha, ref: $ref, repo: (if $repo == "" then null else {full_name: $repo} end)}}' ;;
+            "api repos/o/r/pulls/7 --jq .head.sha") next "$PR_HEADS" ;;
+            *actions/workflows/quality-gate.yml/runs*) cat "$RUNS" ;;
+            "api repos/o/r/actions/runs/"*"/jobs"*) printf '%s\n' "$JOB" ;;
+            "api repos/o/r/actions/runs/"*) next "$STATES" ;;
+            "run rerun "*) return "$RERUN_RC" ;;
+            *) echo "unexpected gh call: $*" >&2; return 1 ;;
+          esac
+        }
+        sleep() { printf '%s\n' "$1" >> "$SLEEPS"; SECONDS=$((SECONDS + $1)); }
+    """
+
+    def wf(self):
+        return (KIT / "ci/quality-gate-refresh.yml").read_text()
+
+    def script(self):
+        return textwrap.dedent(self.wf().split("        run: |\n", 1)[1])
+
+    def test_relay_holds_no_permissions_and_names_pr_and_head_in_its_title(self):
+        relay = (KIT / "ci/quality-gate-review.yml").read_text()
+        triggers = relay.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+        self.assertEqual(triggers.strip(), "pull_request_review:\n    types: [submitted, dismissed]")
+        self.assertIn("\npermissions: {}\n", relay)
+        self.assertEqual(relay.count("permissions:"), 1)
+        self.assertIn("\nname: quality-gate-review\n", relay)
+        # Must stay quoted: in a plain YAML scalar " #" starts a comment, which truncated the title live.
+        self.assertIn('run-name: "quality-gate review event for PR #${{ github.event.pull_request.number }} '
+                      'at ${{ github.event.pull_request.head.sha }}"\n', relay)
+        self.assertNotIn("uses:", relay)
+        self.assertNotIn("secrets.", relay)
+
+    def test_refresh_runs_from_default_branch_with_minimal_permissions_without_repository_code(self):
+        wf = self.wf()
+        triggers = wf.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+        self.assertEqual(triggers.strip(), "workflow_run:\n    workflows: [quality-gate-review]\n    types: [completed]")
+        permissions = wf.split("\npermissions:\n", 1)[1].split("\nconcurrency:", 1)[0]
+        entries = [line.split("#", 1)[0].strip() for line in permissions.splitlines()]
+        self.assertEqual(dict(line.split(": ", 1) for line in entries if line),
+                         {"contents": "read", "actions": "write", "pull-requests": "read"})
+        self.assertEqual(wf.count("permissions:"), 1)
+        self.assertIn("if: github.event.workflow_run.event == 'pull_request_review'", wf)
+        self.assertIn("TITLE: ${{ github.event.workflow_run.display_title }}", wf)
+        # Per PR and head: a refresh for another PR sharing the commit must not cancel this one.
+        self.assertIn("group: quality-gate-refresh-${{ github.event.workflow_run.display_title }}", wf)
+        self.assertNotIn("actions/checkout", wf)
+        self.assertNotIn("uses:", wf)
+        self.assertNotIn("python", wf.lower())
+        self.assertNotIn("code_quality/", self.script())
+        self.assertNotIn("${{", self.script())   # untrusted values reach the shell only through env
+        self.assertIn('gh run rerun "$RUN" --repo "$GH_REPO" --job "$JOB"', self.script())
+        self.assertIn("max_by([.created_at, .id])", self.script())
+        self.assertIn('select(.name == "quality-gate")', self.script())
+
+    def test_gate_run_name_is_quoted_and_identifies_the_pr(self):
+        gate = (KIT / "ci/quality-gate.yml").read_text()
+        line = next(line for line in gate.splitlines() if line.startswith("run-name:"))
+        self.assertRegex(line, r'^run-name: ".*quality-gate for PR #.*"$')
+        self.assertIn("github.event_name == 'pull_request'", line)
+        self.assertIn("format('quality-gate for PR #{0}', github.event.pull_request.number)", line)
+        self.assertIn("|| github.workflow", line)
+
+    def installed(self):
+        names = [n for n in re.findall(r'"(quality-gate[\w-]*\.yml)"', (KIT / "install.py").read_text())]
+        return names
+
+    def test_install_ships_gate_relay_and_refresh(self):
+        self.assertEqual(sorted(set(self.installed())),
+                         ["quality-gate-refresh.yml", "quality-gate-review.yml", "quality-gate.yml"])
+
+    def run_obj(self, id, *, pr=7, repo="o/r", branch="feature", created=None, event="pull_request", title=None):
+        return {"id": id, "event": event, "head_sha": self.SHA, "created_at": created or f"2026-11-15T10:00:{id:02d}Z",
+                "pull_requests": [{"number": pr}] if pr else [], "head_repository": {"full_name": repo},
+                "head_branch": branch, "display_title": title}
+
+    def execute(self, *, title=None, runs=None, pr_heads=None, states=None, job="21",
+                head_repo="o/r", head_ref="feature", rerun_rc=0):
+        """Run the real workflow shell. gh is a stub that serves JSON from files and rejects flag
+        combinations the real CLI rejects; jq and bash are real."""
+        runs = runs if runs is not None else [self.run_obj(2)]
+        pr_heads = list(pr_heads or [self.SHA, self.SHA])
+        states = list(states or ["completed success"])
+        with tempfile.TemporaryDirectory(prefix="kit-test-refresh-") as tmp:
+            root = Path(tmp)
+            for name, lines in (("pr_heads", pr_heads), ("states", states)):
+                (root / name).write_text("".join(f"{line}\n" for line in lines))
+                (root / f"{name}.i").write_text("0\n")
+            (root / "runs").write_text(json.dumps({"workflow_runs": runs}))
+            (root / "sleeps").touch()
+            (root / "calls").touch()
+            env = {**os.environ, "GH_REPO": "o/r", "TITLE": title if title is not None else self.TITLE,
+                   "JOB": job, "HEAD_REPO": head_repo, "HEAD_REF": head_ref, "RUNS": str(root / "runs"),
+                   "PR_HEADS": str(root / "pr_heads"), "STATES": str(root / "states"),
+                   "CALLS": str(root / "calls"), "SLEEPS": str(root / "sleeps"), "RERUN_RC": str(rerun_rc)}
+            result = subprocess.run(["bash", "-e", "-c", self.GH_STUB + self.script()], cwd=root,
+                                    env=env, capture_output=True, text=True)
+            return result, (root / "calls").read_text().splitlines(), (root / "sleeps").read_text().splitlines()
+
+    def reruns(self, calls):
+        return [c for c in calls if c.startswith("run rerun")]
+
+    def test_waits_for_completion_then_reruns_only_this_prs_gate_job(self):
+        result, calls, sleeps = self.execute(states=["queued ", "in_progress ", "completed failure"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(sleeps, ["15", "15"])
+        self.assertEqual(self.reruns(calls), ["run rerun 2 --repo o/r --job 21"])
+        self.assertIn("api repos/o/r/pulls/7 --jq .head.sha", calls)   # live head re-checked before re-running
+        live = calls.index("api repos/o/r/pulls/7 --jq .head.sha")
+        self.assertEqual(calls[live + 1], "run rerun 2 --repo o/r --job 21")   # nothing between check and re-run
+        self.assertIn("/jobs?", calls[live - 1])
+
+    def test_gh_stub_rejects_slurp_with_jq_like_the_real_cli(self):
+        # Every behavioral test above runs the workflow through this stub, so a --slurp/--jq call fails them.
+        for args in ("--paginate --slurp u --jq .", "--jq . --slurp u"):
+            with self.subTest(args=args):
+                res = subprocess.run(["bash", "-c", self.GH_STUB + f"gh api {args}"],
+                                     env={**os.environ, "CALLS": os.devnull}, capture_output=True, text=True)
+                self.assertNotEqual(res.returncode, 0)
+                self.assertIn("not supported with `--jq`", res.stderr)
+
+    def test_malformed_relay_title_fails_without_any_api_call(self):
+        for title in ("", "quality-gate review event for PR #7 at abc", f"quality-gate review event for PR #7; rm -rf / at {self.SHA}",
+                      f"quality-gate review event for PR #7 at {self.SHA}\nmore",
+                      f"quality-gate review event for PR #7 at {self.SHA}\n",
+                      f"quality-gate review event for PR #0 at {self.SHA}",
+                      f"quality-gate review event for PR #07 at {self.SHA}"):
+            with self.subTest(title=title):
+                result, calls, _ = self.execute(title=title)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("::error title=Unrecognised relay run::", result.stdout)
+                self.assertEqual(calls, [])
+
+    def test_title_naming_a_commit_that_is_not_the_live_head_reruns_nothing(self):
+        result, calls, _ = self.execute(pr_heads=["b" * 40])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("::notice title=PR head moved::", result.stdout)
+        self.assertEqual(calls, ["api repos/o/r/pulls/7"])
+
+    def test_selects_only_runs_of_this_pr_newest_first(self):
+        runs = [self.run_obj(2), self.run_obj(5, pr=8, branch="other"),       # another PR sharing the commit
+                self.run_obj(4, event="pull_request_review"), self.run_obj(3),
+                {**self.run_obj(6), "head_sha": "b" * 40}]
+        result, calls, _ = self.execute(runs=runs)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.reruns(calls), ["run rerun 3 --repo o/r --job 21"])
+
+    def test_fork_runs_sharing_a_head_match_only_the_exact_pr_title(self):
+        fork = self.run_obj(3, pr=None, repo="someone/fork", title="quality-gate for PR #7")
+        decoy = self.run_obj(4, pr=None, repo="someone/fork", title="quality-gate for PR #8")
+        result, calls, _ = self.execute(runs=[fork, decoy], head_repo="someone/fork")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.reruns(calls), ["run rerun 3 --repo o/r --job 21"])
+        result, calls, _ = self.execute(runs=[fork], head_repo="")   # deleted fork: no match, no re-run
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("::notice title=No PR gate run yet::", result.stdout)
+        self.assertEqual(self.reruns(calls), [])
+
+    def test_fork_run_with_missing_or_inexact_title_is_not_selected(self):
+        for title in (None, "The PR title", "quality-gate for PR #8", "quality-gate for PR #70",
+                      "quality-gate for PR #7 extra", "quality-gate for PR #7\n"):
+            with self.subTest(title=title):
+                run = self.run_obj(3, pr=None, repo="someone/fork", title=title)
+                result, calls, _ = self.execute(runs=[run], head_repo="someone/fork")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("::notice title=No PR gate run yet::", result.stdout)
+                self.assertEqual(self.reruns(calls), [])
+
+    def test_fork_title_cannot_override_head_repository_branch_or_pr_list(self):
+        for overrides in ({"repo": "other/fork"}, {"branch": "elsewhere"},
+                          {"repo": "other/fork", "branch": "elsewhere"}, {"pr": 8}):
+            with self.subTest(overrides=overrides):
+                fields = {"pr": None, "repo": "someone/fork", "title": "quality-gate for PR #7", **overrides}
+                result, calls, _ = self.execute(runs=[self.run_obj(3, **fields)], head_repo="someone/fork")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("::notice title=No PR gate run yet::", result.stdout)
+                self.assertEqual(self.reruns(calls), [])
+
+    def test_refused_rerun_fails_with_actionable_annotation(self):
+        result, calls, _ = self.execute(rerun_rc=1)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(self.reruns(calls), ["run rerun 2 --repo o/r --job 21"])
+        self.assertIn("::error title=Gate re-run refused::", result.stdout)
+        self.assertIn("quality-gate.yml run 2", result.stdout)
+        self.assertIn("push a commit or close and reopen PR #7 to start a fresh gate run", result.stdout)
+        self.assertNotIn("Re-running quality-gate job", result.stdout)
+
+    def test_cancelled_run_is_superseded_and_not_rerun(self):
+        result, calls, _ = self.execute(states=["completed cancelled"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("::notice title=Gate run superseded::", result.stdout)
+        self.assertEqual(self.reruns(calls), [])
+
+    def test_head_moving_while_waiting_skips_the_stale_rerun(self):
+        result, calls, _ = self.execute(pr_heads=[self.SHA, "b" * 40], states=["in_progress ", "completed success"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("moved past", result.stdout)
+        self.assertEqual(self.reruns(calls), [])
+
+    def test_no_run_emits_notice_and_exits_successfully(self):
+        result, calls, sleeps = self.execute(runs=[])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("will read the review when it runs", result.stdout)
+        self.assertEqual(sleeps, [])
+        self.assertEqual(self.reruns(calls), [])
+
+    def test_timeout_fails_with_annotation_without_rerunning(self):
+        result, calls, sleeps = self.execute(states=["in_progress "] * 1000)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("::error title=Gate refresh timed out::", result.stdout)
+        # bash's real SECONDS clock can tick during the run while the fake sleep returns at once.
+        total = sum(map(int, sleeps))
+        self.assertLessEqual(total, 1200)
+        self.assertGreaterEqual(total, 1200 - 15)
+        self.assertTrue(all(0 < int(seconds) <= 15 for seconds in sleeps))
+        self.assertFalse(any("run rerun" in call or "/jobs?" in call for call in calls))
+
+    def test_missing_job_fails_with_annotation(self):
+        result, calls, _ = self.execute(job="")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("::error title=Missing gate job::", result.stdout)
+        self.assertEqual(self.reruns(calls), [])
+
+
+class GateLiveBase(unittest.TestCase):
+    def gate_job(self):
+        wf = (KIT / "ci/quality-gate.yml").read_text()
+        return wf.split("\n  quality-gate:\n", 1)[1]
+
+    def test_gate_job_resolves_the_live_base_before_staging_the_trusted_kit(self):
+        job = self.gate_job()
+        live = job.index("- name: Live PR base")
+        staging = job.index("- name: Trusted kit from base branch")
+        self.assertLess(live, staging)
+        # The tip of the base branch: the pulls API's base.sha lags behind it (it kept a revoked
+        # reviewer's policy in force in a live test).
+        self.assertIn('gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq \'.base.ref\'', job)
+        self.assertIn('gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$BASE_PATH" --jq \'.object.sha\'', job)
+        self.assertNotIn(".base.sha'", job)
+        self.assertIn('echo "LIVE_BASE=$LIVE_BASE" >> "$GITHUB_ENV"', job)
+        # Staging and Enforce (tier floor, approvals) use the live base, not the event's.
+        self.assertEqual(job.count("BASE_REF: ${{ env.LIVE_BASE }}"), 2)
+        self.assertIn("BASE_REF: ${{ env.LIVE_BASE }}", job[staging:job.index("- name: Fresh evidence directory")])
+        self.assertIn("BASE_REF: ${{ env.LIVE_BASE }}", job[job.index("- name: Enforce"):])
+
+    def test_gate_fails_closed_when_the_live_policy_moved_reviews(self):
+        job = self.gate_job()
+        staging = job[job.index("- name: Trusted kit from base branch"):job.index("- name: Fresh evidence directory")]
+        self.assertIn("RUN_REVIEW_WHERE: ${{ needs.policy.outputs.review_where }}", staging)
+        self.assertIn('if [ "$live_where" != "$RUN_REVIEW_WHERE" ]; then', staging)
+        self.assertIn("::error title=Base policy changed::", staging)
+        self.assertLess(staging.index("BOOTSTRAP"), staging.index("ci_policy.py"))   # no staged script before the bootstrap check
+
+    def test_unavailable_or_malformed_live_base_fails_closed(self):
+        job = self.gate_job()
+        step = job[job.index("- name: Live PR base"):job.index("- name: Trusted kit from base branch")]
+        self.assertIn("set -euo pipefail", step)
+        self.assertIn('[[ ! "$LIVE_BASE" =~ ^[0-9a-f]{40}$ ]]', step)
+        staging = job[job.index("- name: Trusted kit from base branch"):job.index("- name: Fresh evidence directory")]
+        self.assertLess(staging.index('[[ "$BASE_REF" =~ ^[0-9a-f]{40}$ ]]'), staging.index("trusted_kit\n"))
+        self.assertIn('git cat-file -e "$LIVE_BASE^{commit}"', step)
+        self.assertEqual(step.count("exit 1"), 2)
+
+
+class PublishReruns(unittest.TestCase):
+    SHA = "a" * 40
+    PR = {"number": 4, "head": {"sha": "a" * 40, "ref": "feature", "repo": {"full_name": "o/r"}}}
+    FORK_PR = {"number": 7, "head": {"sha": "a" * 40, "ref": "feature", "repo": {"full_name": "x/fork"}}}
+
+    def run_data(self, id=2, **overrides):
+        return {"id": id, "event": "pull_request", "head_sha": self.SHA,
+                "created_at": f"2026-11-15T10:00:{id:02d}Z", "status": "completed",
+                "conclusion": "success", "pull_requests": [{"number": 4}],
+                "head_repository": {"full_name": "o/r"}, "head_branch": "feature", **overrides}
+
+    def test_selects_newest_pr_run_for_sha_without_mutating_input(self):
+        newest = self.run_data(status="in_progress", conclusion=None)
+        runs = [self.run_data(3, event="pull_request_review"), newest,
+                self.run_data(4, event="merge_group"), self.run_data(5, event="push"),
+                self.run_data(1, updated_at="2026-11-16T10:00:00Z", run_attempt=3),
+                self.run_data(6, head_sha="b" * 40)]
+        before = json.dumps(runs)
+        self.assertIs(evidence_comment.select_gate_run(runs, self.SHA, self.PR), newest)
+        self.assertEqual(json.dumps(runs), before)
+        self.assertIsNone(evidence_comment.select_gate_run([], self.SHA, self.PR))
+        self.assertIsNone(evidence_comment.select_gate_run(runs, "c" * 40, self.PR))
+        self.assertIsNone(evidence_comment.select_gate_run([runs[0], runs[2], runs[3]], self.SHA, self.PR))
+
+    def test_selection_is_scoped_to_the_pr(self):
+        ours = self.run_data(2)
+        other_pr = self.run_data(3, pull_requests=[{"number": 9}], head_branch="other")
+        self.assertIs(evidence_comment.select_gate_run([ours, other_pr], self.SHA, self.PR), ours)
+
+    def test_fork_runs_sharing_a_head_match_only_the_exact_pr_title(self):
+        fork_run = self.run_data(2, pull_requests=[], head_repository={"full_name": "x/fork"},
+                                 display_title="quality-gate for PR #7")
+        other_pr = {**fork_run, "id": 3, "created_at": self.run_data(3)["created_at"],
+                    "display_title": "quality-gate for PR #8"}
+        self.assertIs(evidence_comment.select_gate_run([fork_run, other_pr], self.SHA, self.FORK_PR), fork_run)
+        gone = {"number": 7, "head": {"sha": self.SHA, "ref": "feature", "repo": None}}
+        self.assertIsNone(evidence_comment.select_gate_run([fork_run], self.SHA, gone))
+
+    def test_fork_run_with_missing_or_inexact_title_is_not_selected(self):
+        for title in (None, "The PR title", "quality-gate for PR #8", "quality-gate for PR #70",
+                      "quality-gate for PR #7 extra", "quality-gate for PR #7\n"):
+            with self.subTest(title=title):
+                run = self.run_data(pull_requests=[], head_repository={"full_name": "x/fork"}, display_title=title)
+                self.assertIsNone(evidence_comment.select_gate_run([run], self.SHA, self.FORK_PR))
+
+    def test_fork_title_cannot_override_head_repository_branch_or_pr_list(self):
+        fork_run = self.run_data(pull_requests=[], head_repository={"full_name": "x/fork"},
+                                 display_title="quality-gate for PR #7")
+        for overrides in ({"head_repository": {"full_name": "other/fork"}}, {"head_branch": "elsewhere"},
+                          {"head_repository": {"full_name": "other/fork"}, "head_branch": "elsewhere"},
+                          {"pull_requests": [{"number": 8}]}):
+            with self.subTest(overrides=overrides):
+                self.assertIsNone(evidence_comment.select_gate_run([{**fork_run, **overrides}], self.SHA, self.FORK_PR))
+
+    def test_selection_uses_id_to_break_creation_time_ties_and_ignores_conclusion(self):
+        for conclusion in ("success", "failure", "cancelled", "timed_out", "skipped", None):
+            with self.subTest(conclusion=conclusion):
+                newer = self.run_data(3, created_at=self.run_data()["created_at"], conclusion=conclusion)
+                self.assertIs(evidence_comment.select_gate_run([newer, self.run_data()], self.SHA, self.PR), newer)
+
+    def refresh_mocks(self, stack, *, runs=None, statuses=("completed",), conclusion="success", live=None, jobs=None,
+                      rerun_error=None):
+        pages = [{"workflow_runs": []}, {"workflow_runs": runs if runs is not None else [self.run_data()]}]
+        jobs = jobs if jobs is not None else [{"id": 21, "name": "quality-gate", "conclusion": "success"}]
+        calls = stack.enter_context(mock.patch.object(evidence_comment.qlib, "sh", side_effect=[
+            json.dumps(pages), json.dumps([{"jobs": [{"id": 20, "name": "checks"}]}, {"jobs": jobs}]), rerun_error or ""]))
+        polled = [{"status": status, "conclusion": conclusion if status == "completed" else None} for status in statuses]
+        api = stack.enter_context(mock.patch.object(evidence_comment, "gh", side_effect=[
+            *polled, {"head": {"sha": live or self.SHA}}]))
+        sleep = stack.enter_context(mock.patch.object(evidence_comment.time, "sleep"))
+        stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+        return calls, api, sleep
+
+    def test_refresh_reruns_only_selected_gate_after_completion_whatever_its_verdict(self):
+        for conclusion in ("success", "failure", "timed_out", "skipped", "neutral", "action_required"):
+            with self.subTest(conclusion=conclusion), contextlib.ExitStack() as stack:
+                calls, api, sleep = self.refresh_mocks(stack, runs=[self.run_data(conclusion=conclusion)],
+                    statuses=("queued", "in_progress", "completed"), conclusion=conclusion,
+                    jobs=[{"id": 21, "name": "quality-gate", "conclusion": conclusion}])
+                evidence_comment.refresh_gate("o/r", self.SHA, self.PR)
+                self.assertEqual(api.call_args_list, [mock.call("repos/o/r/actions/runs/2")] * 3
+                                 + [mock.call("repos/o/r/pulls/4")])
+                self.assertEqual(sleep.call_args_list, [mock.call(15)] * 2)
+                self.assertEqual(calls.call_args_list[0], mock.call("gh", "api", "--paginate", "--slurp",
+                    f"repos/o/r/actions/workflows/quality-gate.yml/runs?event=pull_request&head_sha={self.SHA}&per_page=100"))
+                self.assertEqual(calls.call_args_list[1], mock.call("gh", "api", "--paginate", "--slurp",
+                    "repos/o/r/actions/runs/2/jobs?filter=latest&per_page=100"))
+                self.assertEqual(calls.call_args_list[2], mock.call(
+                    "gh", "run", "rerun", "2", "--repo", "o/r", "--job", "21"))
+
+    def test_cancelled_run_is_not_rerun(self):
+        with contextlib.ExitStack() as stack:
+            calls, api, _ = self.refresh_mocks(stack, conclusion="cancelled")
+            output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            evidence_comment.refresh_gate("o/r", self.SHA, self.PR)
+            self.assertIn("superseded", output.getvalue())
+            self.assertEqual(calls.call_count, 1)
+
+    def test_refused_rerun_fails_with_actionable_message(self):
+        with contextlib.ExitStack() as stack:
+            error = SystemExit("command failed (1): gh run rerun 2 --repo o/r --job 21\nrun is older than 30 days")
+            calls, _, _ = self.refresh_mocks(stack, rerun_error=error)
+            output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            with self.assertRaises(SystemExit) as raised:
+                evidence_comment.refresh_gate("o/r", self.SHA, self.PR)
+            message = str(raised.exception)
+            self.assertIn("evidence_comment: GitHub refused to re-run quality-gate.yml run 2", message)
+            self.assertIn("push a commit or close and reopen PR #4 to start a fresh gate run", message)
+            self.assertIn(str(error), message)
+            self.assertEqual(calls.call_args, mock.call("gh", "run", "rerun", "2", "--repo", "o/r", "--job", "21"))
+            self.assertNotIn("re-running quality-gate job", output.getvalue())
+
+    def test_head_moving_while_waiting_skips_the_stale_rerun(self):
+        with contextlib.ExitStack() as stack:
+            calls, api, _ = self.refresh_mocks(stack, live="b" * 40)
+            output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            evidence_comment.refresh_gate("o/r", self.SHA, self.PR)
+            self.assertIn("PR head moved", output.getvalue())
+            self.assertEqual(api.call_args_list[-1], mock.call("repos/o/r/pulls/4"))
+            self.assertEqual(calls.call_count, 2)   # runs and jobs looked up; no re-run
+            self.assertFalse(any(c.args[:3] == ("gh", "run", "rerun") for c in calls.call_args_list))
+
+    def test_no_run_is_a_notice_without_polling_or_rerunning(self):
+        with contextlib.ExitStack() as stack:
+            calls, api, sleep = self.refresh_mocks(stack, runs=[])
+            output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            evidence_comment.refresh_gate("o/r", self.SHA, self.PR)
+            self.assertIn("::notice", output.getvalue())
+            self.assertEqual(calls.call_count, 1)
+            api.assert_not_called()
+            sleep.assert_not_called()
+
+    def test_wait_stops_at_twenty_minutes_and_does_not_rerun(self):
+        with contextlib.ExitStack() as stack:
+            calls, api, sleep = self.refresh_mocks(stack, statuses=["in_progress"] * 80)
+            now = [0]
+            stack.enter_context(mock.patch.object(evidence_comment.time, "monotonic", side_effect=lambda: now[0]))
+            sleep.side_effect = lambda seconds: now.__setitem__(0, now[0] + seconds)
+            with self.assertRaisesRegex(SystemExit, "::error.*run 2.*20 minutes"):
+                evidence_comment.refresh_gate("o/r", self.SHA, self.PR)
+            self.assertEqual(now[0], 1200)
+            self.assertEqual(sleep.call_args_list, [mock.call(15)] * 80)
+            self.assertEqual(api.call_count, 80)
+            self.assertEqual(calls.call_count, 1)
+
+    def test_missing_gate_job_fails_without_rerunning_other_jobs(self):
+        with contextlib.ExitStack() as stack:
+            calls, _, _ = self.refresh_mocks(stack, jobs=[])
+            with self.assertRaisesRegex(SystemExit, "no quality-gate job"):
+                evidence_comment.refresh_gate("o/r", self.SHA, self.PR)
+            self.assertEqual(calls.call_count, 2)
+
+    def test_publish_without_approval_refreshes_after_posting_replacement_evidence(self):
+        with tempfile.TemporaryDirectory(prefix="kit-test-publish-") as tmp, contextlib.ExitStack() as stack:
+            state = Path(tmp)
+            (state / "packet.md").write_text("# replacement evidence")
+            (state / "risk.json").write_text(json.dumps({"sha": self.SHA}))
+            (state / f"review-{self.SHA[:12]}.json").write_text(json.dumps({"sha": self.SHA, "blocking": True}))
+            stack.enter_context(mock.patch.object(evidence_comment.qlib, "state_dir", return_value=state))
+            stack.enter_context(mock.patch.object(evidence_comment, "gh", return_value=self.PR))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            events = []
+            def sh(*args):
+                if args == ("git", "rev-parse", "HEAD"):
+                    return self.SHA
+                self.assertEqual(args[:3], ("gh", "pr", "comment"))
+                self.assertIn('"blocking": true', Path(args[-1]).read_text())
+                Path(args[-1]).unlink()
+                events.append("comment")
+                return ""
+            stack.enter_context(mock.patch.object(evidence_comment.qlib, "sh", side_effect=sh))
+            refresh = stack.enter_context(mock.patch.object(evidence_comment, "refresh_gate",
+                side_effect=lambda *args: events.append("refresh")))
+            evidence_comment.publish(argparse.Namespace(pr="4", repo="o/r", approve=False))
+            self.assertEqual(events, ["comment", "refresh"])
+            refresh.assert_called_once_with("o/r", self.SHA, self.PR)
 
 
 class CiPolicy(unittest.TestCase):
@@ -963,7 +1610,8 @@ class EvidenceComments(unittest.TestCase):
                     stack.enter_context(mock.patch.object(evidence_comment.qlib, "state_dir", return_value=state))
                     stack.enter_context(mock.patch.object(evidence_comment.qlib, "load_config", return_value=cfg))
                     stack.enter_context(mock.patch.object(evidence_comment, "gh", return_value=pr))
-                    stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                    output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                    refresh = stack.enter_context(mock.patch.object(evidence_comment, "refresh_gate"))
                     def sh(*args, **kwargs):
                         if args == ("git", "rev-parse", "HEAD"):
                             return self.SHA
@@ -974,6 +1622,8 @@ class EvidenceComments(unittest.TestCase):
                         return ""
                     calls = stack.enter_context(mock.patch.object(evidence_comment.qlib, "sh", side_effect=sh))
                     evidence_comment.publish(argparse.Namespace(pr="4", repo="o/r", approve=True))
+                    refresh.assert_not_called()
+                    self.assertIn("review event triggers quality-gate-refresh.yml", output.getvalue())
                     reviews = [c.args for c in calls.call_args_list if "repos/o/r/pulls/4/reviews" in c.args]
                     self.assertEqual(len(reviews), 1)
                     self.assertEqual(reviews[0][:5], ("gh", "api", "-X", "POST", "repos/o/r/pulls/4/reviews"))
