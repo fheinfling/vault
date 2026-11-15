@@ -11,7 +11,7 @@ The vault holds bank credentials and the owner's complete financial history, loc
 - A connector talks to any host other than its own provider, or any code path can move money: a payment, order or transfer segment or endpoint. The vault reads; it never pays.
 - A re-run sync duplicates, drops or silently rewrites ledger rows: an unstable `externalID`, a wrong upsert key, a balance or holding attached to the wrong account.
 - Money arithmetic in `Double`, or a date stored without its time zone, so a booking lands on the wrong day. Amounts are `Decimal` end to end and stored as text; dates are ISO 8601.
-- `VaultCore`, `FinTSKit` or a connector imports an Apple framework, or `Package.swift` gains a dependency. The Linux build and the zero-dependency rule exist to catch exactly this.
+- `VaultCore` or any future connector imports an Apple framework, or `Package.swift` gains a dependency. The Linux build and the zero-dependency rule exist to catch exactly this.
 - Behavior that differs from the PR's stated intent or acceptance criteria.
 
 ## What Important means here
@@ -41,7 +41,7 @@ Report at most three Nits per review.
 ## Always check
 - A new or changed connector: its provider host is in `scripts/egress/vault.pf.conf`, it uses read-only credentials where the provider offers them, and every failure maps to a `ConnectorError` case (a `needsUserAction` is how the user gets notified).
 - A schema change is a new entry in `Schema.migrations`, never an edit of an old one, and old databases still open.
-- Changed `Connector`, `SecretStore` or `Signer` contracts: every connector and adapter still works.
+- Changed `Connector` or `SecretStore` contracts: every connector and adapter still works.
 - New behavior is behind a flag (default off) and the PR says how to revert.
 
 ## Summary format

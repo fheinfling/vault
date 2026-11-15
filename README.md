@@ -2,7 +2,7 @@
 
 > [!CAUTION]
 > **WORK IN PROGRESS – DO NOT USE.**
-> This project is unfinished and not functional. None of the bank connectors work yet, nothing here
+> This project is unfinished and not functional. No bank connectors are built yet, nothing here
 > has been audited, and the design may change without notice. **Never enter real bank credentials,
 > PINs or API keys into this software, and do not rely on it for any financial data.**
 > It is published for transparency only.
@@ -13,7 +13,7 @@ Licensed for noncommercial use only: see [LICENSE.md](LICENSE.md).
 
 ## Rules
 - **Zero package dependencies.** `Package.swift` declares none; CI fails otherwise.
-- **`VaultCore`, `FinTSKit` and the connectors import Foundation only.** CI builds them on Linux.
+- **`VaultCore` and future connectors import Foundation only.** CI builds the core on Linux.
 - **Apple frameworks only in `VaultApple` and the shells.**
 - **No payment code, anywhere.**
 - **Secrets only in the Keychain**, through `SecretStore`.
@@ -23,17 +23,17 @@ Licensed for noncommercial use only: see [LICENSE.md](LICENSE.md).
 | Target | Imports | Contents |
 |---|---|---|
 | `VaultCore` | Foundation | models, ledger over the system SQLite, `Connector` and adapter protocols, sync engine, CSV |
-| `FinTSKit` | Foundation | FinTS 3.0 PIN/TAN client, read-only (in progress) |
-| `Connector*` | Foundation, VaultCore | one per source: DKB, Trade Republic CSV, Enable Banking, Scalable, exchanges |
-| `VaultApple` | Security, CryptoKit, … | Keychain, signer, notifier, launch agent, browser auth |
+| `VaultApple` | Security, CryptoKit, … | Keychain, field cipher, notifier, launch agent, egress check |
 | `vault` | all of the above | the command-line tool |
+
+Connectors arrive one per source, in the PR that implements them.
 
 ## Use
 ```sh
 swift build
 swift test
 .build/debug/vault accounts
-.build/debug/vault sync          # warns: a build run from .build/ is not egress-confined
+.build/debug/vault sync          # no connectors are built yet; exits 0
 VAULT_DB=/tmp/test.db .build/debug/vault accounts
 ```
 
@@ -50,7 +50,7 @@ sudo install -m 2755 -o root -g vault .build/release/vault /usr/local/bin/vault
 /usr/local/bin/vault schedule    # launch agent, every 4 hours and at login, running this binary
 ```
 
-`VAULT_REQUIRE_EGRESS=1` makes `vault sync` refuse to run unconfined. Once the allowlist is installed, run `/usr/local/bin/vault schedule --require-egress` to put it in the launch agent's environment. Re-scheduling later keeps it, along with any other `EnvironmentVariables` already in the plist.
+`VAULT_REQUIRE_EGRESS=1` makes `vault sync` refuse to run connectors unconfined. Once the allowlist is installed, run `/usr/local/bin/vault schedule --require-egress` to put it in the launch agent's environment. Re-scheduling later keeps it, along with any other `EnvironmentVariables` already in the plist.
 
 Data lives in `~/Library/Application Support/vault/vault.db` (mode 0600). Account names,
 providers and masked IBANs; balances; holding names, ISINs, quantities, prices and values;
