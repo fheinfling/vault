@@ -965,6 +965,23 @@ class GateHardening(unittest.TestCase):
         for name in ("policy", "checks", "quality-gate"):
             self.assertNotIn("pull-requests: write", self.job(name), name)
 
+    def test_every_workflow_declares_top_level_permissions_without_write(self):
+        for path in sorted((KIT / "ci").glob("*.yml")):
+            with self.subTest(workflow=path.name):
+                permissions = []
+                in_permissions = False
+                for line in path.read_text().splitlines():
+                    line = line.split("#", 1)[0].rstrip()
+                    if not line.strip():
+                        continue
+                    if not line[0].isspace():
+                        in_permissions = line.startswith("permissions:")
+                    if in_permissions:
+                        permissions.append(line)
+                self.assertTrue(permissions, "workflow must declare top-level permissions")
+                self.assertNotRegex("\n".join(permissions), r"\bwrite\b",
+                                    "write permissions must be scoped to jobs")
+
     def test_gate_runs_only_on_pr_and_merge_group_with_one_group_per_pr(self):
         wf = self.wf()
         triggers = wf.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
@@ -1092,11 +1109,14 @@ class GateRefreshWorkflow(unittest.TestCase):
         wf = self.wf()
         triggers = wf.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
         self.assertEqual(triggers.strip(), "workflow_run:\n    workflows: [quality-gate-review]\n    types: [completed]")
-        permissions = wf.split("\npermissions:\n", 1)[1].split("\nconcurrency:", 1)[0]
+        self.assertIn("\npermissions: {}\n", wf)
+        refresh = wf.split("\njobs:\n  refresh:\n", 1)[1]
+        permissions = refresh.split("\n    permissions:\n", 1)[1].split("\n    env:", 1)[0]
         entries = [line.split("#", 1)[0].strip() for line in permissions.splitlines()]
+        self.assertEqual(len([line for line in entries if line]), 3)
         self.assertEqual(dict(line.split(": ", 1) for line in entries if line),
                          {"contents": "read", "actions": "write", "pull-requests": "read"})
-        self.assertEqual(wf.count("permissions:"), 1)
+        self.assertEqual(wf.count("permissions:"), 2)
         self.assertIn("if: github.event.workflow_run.event == 'pull_request_review'", wf)
         self.assertIn("TITLE: ${{ github.event.workflow_run.display_title }}", wf)
         # Per PR and head: a refresh for another PR sharing the commit must not cancel this one.
