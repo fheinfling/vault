@@ -1,0 +1,17 @@
+{
+  "id": "rule-speculative-code-safe",
+  "kind": "clean",
+  "intent": "Make the greeting's date deterministic in tests by injecting a clock. Preserve the default greeting behavior using today's date.",
+  "fixture": {
+    "base": {
+      "src/greeting.py": "from datetime import date\n\n\ndef greeting(name):\n    return f\"Hello {name}, {date.today().isoformat()}\"\n",
+      "tests/test_greeting.py": "import unittest\nfrom datetime import date\n\nfrom src.greeting import greeting\n\n\nclass GreetingTests(unittest.TestCase):\n    def test_default_clock(self):\n        self.assertEqual(greeting(\"Ada\"), f\"Hello Ada, {date.today().isoformat()}\")\n"
+    },
+    "head": {
+      "src/clock.py": "from abc import ABC, abstractmethod\nfrom datetime import date\n\n\nclass Clock(ABC):\n    @abstractmethod\n    def today(self):\n        raise NotImplementedError\n\n\nclass SystemClock(Clock):\n    def today(self):\n        return date.today()\n",
+      "src/greeting.py": "from src.clock import SystemClock\n\n\ndef greeting(name, clock=None):\n    if clock is None:\n        clock = SystemClock()\n    return f\"Hello {name}, {clock.today().isoformat()}\"\n",
+      "tests/test_greeting.py": "import unittest\nfrom datetime import date\n\nfrom src.clock import Clock\nfrom src.greeting import greeting\n\n\nclass FakeClock(Clock):\n    def today(self):\n        return date(2026, 11, 15)\n\n\nclass GreetingTests(unittest.TestCase):\n    def test_default_clock(self):\n        self.assertEqual(greeting(\"Ada\"), f\"Hello Ada, {date.today().isoformat()}\")\n\n    def test_fixed_clock(self):\n        self.assertEqual(greeting(\"Ada\", FakeClock()), \"Hello Ada, 2026-11-15\")\n"
+    }
+  },
+  "expect": []
+}

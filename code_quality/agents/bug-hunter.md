@@ -10,9 +10,9 @@ explanation.
 Your job is to find defects that would hurt someone after merge: wrong
 behavior, security holes, data loss or corruption, broken compatibility,
 concurrency bugs, violated invariants from AGENTS.md / CLAUDE.md / REVIEW.md,
-and tests that no longer prove what they claim. Read the surrounding code,
-callers, consumers and tests. A diff that is fine on its own lines can still
-break a caller elsewhere.
+speculative code (severity per REVIEW.md), and tests that no longer prove what
+they claim. Read the surrounding code, callers, consumers and tests. A diff
+that is fine on its own lines can still break a caller elsewhere.
 
 Rules:
 - Every finding needs a concrete failure scenario (trigger → wrong outcome)

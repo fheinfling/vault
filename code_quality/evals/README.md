@@ -109,6 +109,9 @@ The folder ships with cases so the pipeline can be exercised on day one:
 | `rule-tenant-scope-trigger` | rule | REVIEW.md "queries are scoped to the tenant": an unscoped query reaches a per-tenant endpoint |
 | `rule-tenant-scope-safe` | clean | The safe counterexample: an admin-only cross-tenant report behind `require_admin` |
 | `rule-tenant-scope-unrelated` | clean | An unrelated change (date formatting) that must draw no Important finding |
+| `rule-speculative-code-trigger` | rule | Unused provider stubs/abstraction are Nit; an unused auth packet parser is Important |
+| `rule-speculative-code-safe` | clean | A clock interface used by production code and a test fake is a required test seam |
+| `rule-speculative-code-unrelated` | clean | An ordinary label-trimming bug fix adds no speculative code |
 | `clean-looks-risky-auth-rename` | clean | A pure rename inside `src/auth/` with its caller and test updated |
 | `clean-kit-fix-2026-11-13` | clean | Real history: the kit's own bug-fix commit, pointing at this repo |
 

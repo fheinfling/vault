@@ -28,6 +28,8 @@ spending an hour debugging production is a failure.
    automatic rollback. *(Google TAP, rollouts; Anthropic latest→stable)*
 7. **The reviewer is tested like code.** Incidents become eval cases, noise is
    measured, and a prompt or model change is kept only if the score improves. *(Anthropic, OpenAI, Google AutoCommenter)*
+8. **KISS/YAGNI:** build only what the acceptance criteria need; prefer deleting
+   speculative code to adding it (see `rules/AGENTS.md` and `rules/REVIEW.md`).
 
 ---
 

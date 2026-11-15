@@ -18,6 +18,9 @@ The vault holds bank credentials and the owner's complete financial history, loc
 Reserve **Important** for findings that would break behavior, leak data,
 corrupt state, or block a rollback, plus any violation of a rule in AGENTS.md /
 CLAUDE.md / this file. Style, naming, and refactoring ideas are Nit at most.
+For speculative code, security-sensitive surface added with no caller (crypto,
+parsing untrusted input, auth, network) is **Important**; other needless
+complexity is **Nit**, even when it violates the simplicity rules.
 Mark bugs the PR did not introduce as **Pre-existing**, unless the PR newly
 exposes or worsens them.
 
@@ -39,6 +42,10 @@ Report at most three Nits per review.
 - Requests to add abstraction, comments, or tests for cases that can't happen.
 
 ## Always check
+- flag code this PR adds that nothing in the PR or existing code calls or
+  needs: stubs, placeholders, single-implementation abstractions without a
+  required test/platform seam, unused parameters/options/config; safe path:
+  the acceptance criteria use it, or a test or platform boundary needs the seam.
 - A new or changed connector: its provider host is in `scripts/egress/vault.pf.conf`, it uses read-only credentials where the provider offers them, and every failure maps to a `ConnectorError` case (a `needsUserAction` is how the user gets notified).
 - A schema change is a new entry in `Schema.migrations`, never an edit of an old one, and old databases still open.
 - Changed `Connector` or `SecretStore` contracts: every connector and adapter still works.

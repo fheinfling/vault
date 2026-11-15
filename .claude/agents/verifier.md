@@ -29,6 +29,8 @@ For each candidate:
    (git blame helps), unless the change newly exposes it.
 
 Special cases:
+- Speculative code: check callers, acceptance criteria and required test/platform
+  seams; use REVIEW.md's severity, including Important for unused security surface.
 - Test-integrity candidates (deleted/skipped tests, removed assertions,
   suppressions, loosened thresholds, regenerated snapshots): confirm unless
   the stated intent of the change requires it (e.g. the feature was removed,
