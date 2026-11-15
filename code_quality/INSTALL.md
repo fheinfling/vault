@@ -38,9 +38,11 @@ python3 /path/to/code_quality/install.py . --profile solo   # or team
 
 It copies the kit, creates `quality.toml`, `AGENTS.md`, `CLAUDE.md`, `REVIEW.md`, the
 PR template (and CODEOWNERS for team) only where missing, installs the three subagents
-and the workflow, adds `.quality/` to `.gitignore`, and merges the hooks and deny rules
+and both workflows, adds `.quality/` to `.gitignore`, and merges the hooks and deny rules
 into `.claude/settings.json`. It prints what it did, what it left alone, and the
 checklist below. Re-running it later updates the kit without touching your files.
+The kit owns `.github/workflows/quality-gate.yml` and
+`.github/workflows/quality-gate-refresh.yml`; both are overwritten on update.
 Commit: `git add -A && git commit -m "quality kit: install (mechanical)"`.
 
 ## 2. Make `quality.toml` true for this repo
@@ -99,6 +101,17 @@ The last line is the sanity check that the floors work: your install branch edit
 quality system, so it must classify as Tier 2.
 
 ## 6. GitHub
+
+Pushes trigger `quality-gate.yml` through `pull_request`; it also handles `merge_group`.
+Reviews submitted or dismissed trigger `quality-gate-refresh.yml`. The refresh uses
+only `gh` calls, with `contents: read` and `actions: write`, no checkout or repository
+code. It selects the newest PR run for the head SHA, waits for completion (polling
+every 15 seconds, at most 20 minutes), then re-runs only its `quality-gate` job,
+whatever its previous conclusion. `evidence_comment.py publish` performs the same
+refresh after posting evidence; with `--approve`, the review event handles it.
+No existing run means a notice and success: the PR run will read the review/evidence
+when it runs. A timeout fails with an error. The ruleset still requires `checks` and
+`quality-gate`, with no additional required check for the refresh workflow.
 
 What you can do with `gh` (needs push access, not admin):
 

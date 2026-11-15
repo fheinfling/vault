@@ -1,0 +1,63 @@
+# Review events refresh the PR run's existing gate check. This workflow never checks out or
+# executes repository code; its write permission is used only to re-run the quality-gate job.
+name: quality-gate-refresh
+
+on:
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: quality-gate-refresh-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Re-evaluate the newest PR run's gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN=$(gh api --paginate --slurp \
+            "repos/$GH_REPO/actions/workflows/quality-gate.yml/runs?event=pull_request&head_sha=$HEAD_SHA&per_page=100" \
+            --jq '[.[].workflow_runs[] | select(.event == "pull_request")] | max_by([.created_at, .id]) | .id // empty')
+          if [ -z "$RUN" ]; then
+            echo "::notice title=No PR gate run yet::No quality-gate.yml pull_request run exists for $HEAD_SHA; that run will read the review when it runs."
+            exit 0
+          fi
+
+          deadline=$((SECONDS + 1200))
+          status=""
+          while (( SECONDS < deadline )); do
+            status=$(gh api "repos/$GH_REPO/actions/runs/$RUN" --jq '.status')
+            if [ "$status" = "completed" ]; then
+              break
+            fi
+            remaining=$((deadline - SECONDS))
+            if (( remaining > 0 )); then
+              sleep "$((remaining < 15 ? remaining : 15))"
+            fi
+          done
+          if [ "$status" != "completed" ]; then
+            echo "::error title=Gate refresh timed out::quality-gate.yml run $RUN did not complete within 20 minutes; unable to re-evaluate quality-gate."
+            exit 1
+          fi
+
+          JOB=$(gh api --paginate --slurp \
+            "repos/$GH_REPO/actions/runs/$RUN/jobs?filter=latest&per_page=100" \
+            --jq '[.[].jobs[] | select(.name == "quality-gate")] | max_by(.id) | .id // empty')
+          if [ -z "$JOB" ]; then
+            echo "::error title=Missing gate job::quality-gate.yml run $RUN has no quality-gate job to re-run."
+            exit 1
+          fi
+          gh run rerun "$RUN" --repo "$GH_REPO" --job "$JOB"
+          echo "Re-running quality-gate job $JOB of run $RUN."

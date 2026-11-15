@@ -64,6 +64,7 @@ code_quality/
 │   ├── settings.json         ← Stop hook + PreToolUse guard + deny rules → .claude/settings.json
 │   └── protect_paths.py      ← agents can't edit the rules they're judged by
 ├── ci/quality-gate.yml       ← GitHub Actions: checks, review, approval gate, merge queue
+├── ci/quality-gate-refresh.yml ← review submitted/dismissed: re-run the PR run's gate job
 ├── templates/                ← PR template, CODEOWNERS (closes the workflow self-edit hole)
 ├── evals/                    ← incidents → reviewer regression tests; runner
 ├── tests/                    ← the kit's own regression tests (stdlib unittest)
@@ -79,10 +80,12 @@ python3 /path/to/code_quality/install.py <repo> --profile solo   # or --profile 
 ```
 
 It copies the kit, creates the policy and rules files only where they are missing
-(yours are never overwritten), installs the subagents and the workflow, merges the
+(yours are never overwritten), installs the subagents and both workflows, merges the
 hooks into `.claude/settings.json`, and prints what is still yours to do. To have an
 agent do that part, send it [INSTALL.md](INSTALL.md); it says how, including the
 `QUALITY_ALLOW_POLICY_EDITS=1` the install session needs.
+Both `.github/workflows/quality-gate.yml` and `quality-gate-refresh.yml` are kit-owned
+and overwritten on updates.
 
 Then:
 
@@ -159,6 +162,18 @@ accepting it only from a human in `[risk].humans` and only for the head commit.
 No comment, no merge. What you give up: the review no longer runs in a neutral
 environment, so the sign-off rests on the publisher's machine and judgment.
 
+**Gate re-evaluation.** Pushes start `quality-gate.yml` through `pull_request`;
+the workflow also runs on `merge_group`. A review submitted or dismissed starts
+`quality-gate-refresh.yml`, which uses only `gh` API calls, with no checkout or
+repository code. It selects the newest `pull_request` run for the head SHA, polls
+every 15 seconds for up to 20 minutes until it completes, then re-runs that run's
+`quality-gate` job regardless of its conclusion, including success or cancellation.
+`publish` does the same after posting evidence; `publish --approve` leaves the
+refresh to the review event. If no PR run exists yet, the refresh reports a notice;
+that run will read the review/evidence when it runs. A wait timeout fails explicitly.
+Reviews refresh the existing PR gate check instead of adding another gate run.
+The ruleset still requires `checks` and `quality-gate`; the refresh job is not required.
+
 **Nested sandboxes.** Codex's own sandbox can't start inside another sandbox
 (for example, when the loop runs from a sandboxed Claude Code session). The
 review then reports *incomplete* and blocks, which is deliberate: it fails
@@ -191,7 +206,7 @@ opens small PRs that go through the same flow (mostly T0/T1):
   multiply, so the eval set measures the whole pipeline.
 - The path floors are only as good as your list of sensitive paths. Review the
   classifier's misses weekly at first.
-- `approval_gate.py` and the workflow are templates. Test them on a sandbox
+- `approval_gate.py` and the workflows are templates. Test them on a sandbox
   repo before making them required.
 
 ## References

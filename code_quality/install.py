@@ -6,7 +6,7 @@
 Deterministic steps only: copy, create-if-missing, merge, append. Files you are meant to make
 repo-specific (quality.toml, AGENTS.md, CLAUDE.md, REVIEW.md, the PR template, CODEOWNERS) are
 created when missing and never overwritten. Kit-owned files (code_quality/, the subagents, the
-workflow) are always brought up to date; the repo's own eval cases are kept. It ends with the
+workflows) are always brought up to date; the repo's own eval cases are kept. It ends with the
 checklist of what is still a person's, or the installing agent's (INSTALL.md), to do.
 """
 
@@ -118,7 +118,8 @@ class Installer:
             self.create_if_missing(name, KIT / "rules" / name)
         for name in SUBAGENTS:
             self.overwrite(f".claude/agents/{name}", KIT / "agents" / name)
-        self.overwrite(".github/workflows/quality-gate.yml", KIT / "ci" / "quality-gate.yml")
+        for name in ("quality-gate.yml", "quality-gate-refresh.yml"):
+            self.overwrite(f".github/workflows/{name}", KIT / "ci" / name)
         self.create_if_missing(".github/PULL_REQUEST_TEMPLATE.md", KIT / "templates" / "PULL_REQUEST_TEMPLATE.md")
         if self.profile == "team":
             self.create_if_missing(".github/CODEOWNERS", KIT / "templates" / "CODEOWNERS")

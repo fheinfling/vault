@@ -24,13 +24,16 @@
 #   "local" the loop runs on a developer's machine; evidence_comment.py publishes its evidence to
 #           the PR, and the quality-gate job verifies it against the head commit. No secrets.
 # The `checks` job runs on [ci].runs_on after [ci].setup, both from the base policy.
+# PR events (including pushes) and merge_group start this workflow. Reviews submitted or
+# dismissed trigger quality-gate-refresh.yml, which waits for the newest PR run for the head
+# to complete and re-runs only its quality-gate job, whatever its conclusion. Local evidence
+# publish does the same; publish --approve delegates to the review event's refresh workflow.
+# The ruleset still requires only `checks` and `quality-gate`.
 name: quality-gate
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, labeled]
-  pull_request_review:
-    types: [submitted, dismissed]
   merge_group:
 
 # Least privilege. No job writes a commit status: the quality-gate job's own result is the verdict.
@@ -39,10 +42,9 @@ on:
 permissions:
   contents: read
 
-# One group per event kind. An approval (pull_request_review) must never cancel the review run
-# (pull_request) whose evidence it needs; a new push still cancels the now-stale review.
+# One group per PR (or merge-queue ref); a new push cancels the now-stale run.
 concurrency:
-  group: quality-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: quality-gate-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -73,9 +75,8 @@ jobs:
           python3 $RUNNER_TEMP/trusted/code_quality/scripts/ci_policy.py $RUNNER_TEMP/trusted/quality.toml | grep -v '^bootstrap=' >> "$GITHUB_OUTPUT"
 
   checks:
-    # Deterministic gates: on every push, on every review event (a skipped required job would count as
-    # passing, and the approval status must never be computed without them), and again in the merge
-    # queue against the latest main with the change applied.
+    # Deterministic gates: on every PR event, and again in the merge queue against the latest main
+    # with the change applied. A gate refresh retains these results from the original PR run.
     needs: policy
     runs-on: ${{ needs.policy.outputs.runs_on }}
     steps:
@@ -147,12 +148,12 @@ jobs:
 
   # Required check #2 (with `checks`). Passes only when the review for THIS head
   # commit has no open blockers and the tier's number of HUMAN approvals exist on
-  # THIS head commit. Re-evaluated whenever a review is submitted or dismissed.
+  # THIS head commit. Reviews and evidence publication re-run this job in the existing PR run.
   quality-gate:
     # The verdict is this job: green when the review and the human sign-off are complete for the head
     # commit, red otherwise. "Waiting for you" is red too, but says so plainly at the top of the check.
-    # Every re-evaluation (push, review submitted or dismissed) creates a new run of this job, so the
-    # required check is pending while it runs and never shows a stale result.
+    # A push starts a new PR run. Review/evidence refreshes re-run this job regardless of its prior
+    # conclusion, so replacement evidence also invalidates a previously passing verdict.
     if: always()
     needs: [policy, checks, review]
     runs-on: ubuntu-latest
@@ -184,6 +185,9 @@ jobs:
       - name: Fresh evidence directory
         if: github.event_name != 'merge_group'
         run: |
+          # The classifier writes .quality/risk.json in the checkout. Remove planted files and
+          # symlinks before it runs, so that write cannot be redirected into the trusted kit.
+          rm -rf .quality
           # The checkout may contain planted evidence. Only trusted fetch/download steps fill this
           # new directory, including on re-runs where evidence for the head may not exist yet.
           EVIDENCE_DIR=$(mktemp -d "$RUNNER_TEMP/quality-evidence.XXXXXX")
@@ -191,18 +195,6 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: github.event_name == 'pull_request' && needs.policy.outputs.review_where == 'ci' && needs.review.result == 'success'
         with: { name: quality-evidence, path: "${{ env.EVIDENCE_DIR }}" }
-      - name: Evidence from this head's latest review run (approval events, ci mode)
-        if: github.event_name == 'pull_request_review' && needs.policy.outputs.review_where == 'ci'
-        env: { GH_TOKEN: "${{ github.token }}" }
-        run: |
-          RUN=$(gh run list --workflow quality-gate.yml --commit "${{ github.event.pull_request.head.sha }}" \
-                --event pull_request --json databaseId,status,conclusion \
-                -q '[.[] | select(.status=="completed" and .conclusion!="cancelled")][0].databaseId')
-          if [ -z "$RUN" ]; then
-            echo "::error title=Waiting for the review run::The review for this commit has not finished yet. When it has, re-run this job."
-            exit 1
-          fi
-          gh run download "$RUN" -n quality-evidence -D "$EVIDENCE_DIR"
       - name: Evidence published from a local review (local mode)
         if: github.event_name != 'merge_group' && needs.policy.outputs.review_where == 'local'
         env: { GH_TOKEN: "${{ github.token }}" }
@@ -238,7 +230,7 @@ jobs:
             WAIT="Approve PR #${{ github.event.pull_request.number }} on head commit ${{ github.event.pull_request.head.sha }} (or submit a /director-approve review on that commit when the director rule applies)."
             MISSING="Wait for the CI review run to finish, then re-run this job."
           fi
-          if [ "${{ needs.checks.result }}" != "success" ]; then   # every event: checks ran in this run
+          if [ "${{ needs.checks.result }}" != "success" ]; then   # checks belong to this PR run
             item failure "Checks failed" "The deterministic checks failed for this commit."
           else
             item ok "Deterministic checks" "Passed for this commit."

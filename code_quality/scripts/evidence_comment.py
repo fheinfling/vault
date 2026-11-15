@@ -7,6 +7,8 @@
       commit already pushed. --approve also submits your sign-off on that commit, so one command
       is the whole human step: an APPROVE review when you are not the PR author (a bot-opened
       PR), a `/director-approve` review when you are (GitHub won't let authors approve).
+      Publication waits for the newest PR workflow run and re-runs its quality-gate job;
+      --approve delegates that refresh to quality-gate-refresh.yml via the review event.
 
   evidence_comment.py fetch --pr N --sha <head> [--repo owner/name] [--config quality.toml] [--out .quality]
       CI: finds the newest evidence comment for that head commit, posted by a human listed in
@@ -32,6 +34,7 @@ import json
 import re
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import qlib
@@ -146,39 +149,49 @@ def publish(args: argparse.Namespace) -> None:
         qlib.sh("gh", "api", "-X", "POST", f"repos/{repo}/pulls/{args.pr}/reviews", "-f", f"commit_id={sha}",
                 "-f", f"event={event}", "-f", f"body={text}")
         print(f"{event} review submitted on {sha[:10]}")
-    rerun_failed_gates(repo, sha)
+        print("Skipping local gate refresh: the review event triggers quality-gate-refresh.yml.")
+    else:
+        refresh_gate(repo, sha)
 
 
-def failed_gate_jobs(runs: list[dict]) -> list[tuple[str, str]]:
-    """(run id, job id) of every completed run's failed quality-gate job.
+def select_gate_run(runs: list[dict], sha: str) -> dict | None:
+    """Newest pull_request run for sha from the workflow-runs API, regardless of status/verdict.
 
-    A required check passes only when no check run of that name on the commit is red, and every
-    workflow run (the PR event, each review event) leaves its own. So after new evidence or a
-    sign-off, each earlier failed quality-gate job has to be re-evaluated, not just the newest."""
-    out = []
-    for run in runs:
-        if run.get("status") != "completed":
-            continue
-        for job in run.get("jobs", []):
-            if job.get("name") == "quality-gate" and job.get("conclusion") == "failure":
-                out.append((str(run["databaseId"]), str(job["databaseId"])))
-    return out
+    Callers list quality-gate.yml's runs. Creation time (then ID to break ties) determines
+    recency; an older run's later re-run must not displace the newest PR run.
+    """
+    return max((run for run in runs if run.get("event") == "pull_request" and run.get("head_sha") == sha),
+               key=lambda run: (run["created_at"], run["id"]), default=None)
 
 
-def rerun_failed_gates(repo: str, sha: str) -> None:
-    listed = json.loads(qlib.sh("gh", "run", "list", "--repo", repo, "--workflow", "quality-gate.yml",
-                                "--commit", sha, "--limit", "50", "--json", "databaseId,status", check=False) or "[]")
-    runs = []
-    for run in listed:
-        jobs = json.loads(qlib.sh("gh", "run", "view", str(run["databaseId"]), "--repo", repo, "--json", "jobs",
-                                  "-q", ".jobs", check=False) or "[]")
-        runs.append({**run, "jobs": jobs})
-    targets = failed_gate_jobs(runs)
-    for run_id, job_id in targets:
-        qlib.sh("gh", "run", "rerun", run_id, "--repo", repo, "--job", job_id, check=False)
-        print(f"re-running the failed quality-gate job of run {run_id}")
-    if not targets:
-        print("no failed quality-gate job on this commit to re-run; runs still in progress read the new evidence")
+def refresh_gate(repo: str, sha: str) -> None:
+    pages = json.loads(qlib.sh("gh", "api", "--paginate", "--slurp",
+                              f"repos/{repo}/actions/workflows/quality-gate.yml/runs"
+                              f"?event=pull_request&head_sha={sha}&per_page=100"))
+    run = select_gate_run([run for page in pages for run in page["workflow_runs"]], sha)
+    if run is None:
+        print(f"::notice title=No PR gate run yet::No quality-gate.yml pull_request run exists for {sha}; "
+              "that run will read the evidence when it runs.")
+        return
+    run_id = str(run["id"])
+    deadline = time.monotonic() + 20 * 60
+    while time.monotonic() < deadline:
+        if gh(f"repos/{repo}/actions/runs/{run_id}")["status"] == "completed":
+            break
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(15, remaining))
+    else:
+        sys.exit(f"::error title=Gate refresh timed out::quality-gate.yml run {run_id} did not complete "
+                 "within 20 minutes; unable to re-evaluate quality-gate.")
+    pages = json.loads(qlib.sh("gh", "api", "--paginate", "--slurp",
+                              f"repos/{repo}/actions/runs/{run_id}/jobs?filter=latest&per_page=100"))
+    job = next((job for page in pages for job in page["jobs"] if job["name"] == "quality-gate"), None)
+    if job is None:
+        sys.exit(f"evidence_comment: run {run_id} has no quality-gate job to re-run")
+    qlib.sh("gh", "run", "rerun", run_id, "--repo", repo, "--job", str(job["id"]))
+    print(f"re-running quality-gate job {job['id']} of run {run_id}")
+
 
 def fetch(args: argparse.Namespace) -> None:
     cfg = qlib.load_config(args.config)
