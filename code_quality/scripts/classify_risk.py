@@ -58,7 +58,7 @@ def model_opinion(cfg: dict, base: str) -> dict | None:
          "--output-format", "json", "--json-schema", schema,
          "--allowedTools", "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)",
          "--permission-mode", "dontAsk"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     try:
         return json.loads(res.stdout)["structured_output"]

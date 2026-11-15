@@ -78,6 +78,94 @@ class TempRepo:
         return json.loads(out)["findings"]
 
 
+class NonUtf8Output(unittest.TestCase):
+    def test_integrity_and_risk_accept_non_utf8_text_diff(self):
+        with TempRepo() as r:
+            r.write("README.md", "base\n")
+            r.commit("base")
+            r.mark_base()
+            git(r.path, "switch", "-q", "-c", "corpus")
+            r.write("tests/corpus/non_utf8.txt", "")
+            (r.path / "tests/corpus/non_utf8.txt").write_bytes(b"invalid utf-8: \xff\n")
+            r.commit("add non-UTF-8 corpus")
+            diff = subprocess.run(["git", "diff", "origin/main...HEAD"], cwd=r.path,
+                                  check=True, capture_output=True).stdout
+            self.assertIn(b"+invalid utf-8: \xff\n", diff)  # Git treats this as text, not binary.
+            for script, extra in [("check_test_integrity.py", []),
+                                  ("classify_risk.py", ["--config", str(KIT / "quality.toml")])]:
+                with self.subTest(script=script):
+                    res = subprocess.run([sys.executable, str(KIT / "scripts" / script),
+                                          "--base", "origin/main", *extra], cwd=r.path,
+                                         capture_output=True, text=True)
+                    self.assertEqual(res.returncode, 0, res.stderr)
+                    out = json.loads(res.stdout)
+                    if script == "check_test_integrity.py":
+                        self.assertTrue(out["complete"])
+                        self.assertEqual(out["findings"], [])
+                    else:
+                        self.assertEqual(out["files"], 1)
+                        self.assertIsNone(out["model"])
+
+    def test_model_wrappers_replace_non_utf8_output_and_encode_prompts(self):
+        stub = r'''
+import pathlib, sys
+sys.stderr.buffer.write(b"diagnostic: \xff\n")
+if "-o" in sys.argv:
+    assert sys.stdin.buffer.read() == "Review café".encode("utf-8")
+    pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_text('{"summary": "ok"}')
+    sys.stdout.buffer.write(b"progress: \xff\n")
+else:
+    sys.stdout.buffer.write(b'{"structured_output": {"summary": "\xff"}}')
+'''
+        with tempfile.TemporaryDirectory(prefix="kit-test-model-output-") as tmp:
+            root = Path(tmp)
+            for name in ("claude", "codex"):
+                cli = root / name
+                cli.write_text(f"#!{sys.executable}\n" + stub, encoding="utf-8")
+                cli.chmod(0o755)
+            schema = KIT / "schemas" / "risk.schema.json"
+            with mock.patch.dict(os.environ, {"PATH": str(root) + os.pathsep + os.environ["PATH"]}), \
+                    mock.patch.object(classify_risk.qlib, "merge_base", return_value="base"):
+                self.assertEqual(classify_risk.model_opinion({"agents": {"claude_model": "stub"}}, "base"),
+                                 {"summary": "\ufffd"})
+                self.assertEqual(cross_review.run_claude("Review café", schema, "stub", cwd=root),
+                                 {"summary": "\ufffd"})
+                self.assertEqual(cross_review.run_codex("Review café", schema, "stub", cwd=root),
+                                 {"summary": "ok"})
+
+
+class QualityGate(unittest.TestCase):
+    def run_gate(self, integrity: str) -> subprocess.CompletedProcess:
+        with TempRepo() as r:
+            r.write("quality.toml", '[checks]\nfull = ["true"]\n')
+            r.write("code_quality/scripts/check_test_integrity.py", integrity)
+            gate = r.path / "code_quality/scripts/quality_gate.sh"
+            shutil.copy2(KIT / "scripts" / "quality_gate.sh", gate)
+            r.commit("base")
+            r.mark_base()
+            return subprocess.run(["bash", str(gate), "full"], cwd=r.path,
+                                  env={**os.environ, "QUALITY_BASE": "origin/main"},
+                                  capture_output=True, text=True)
+
+    def test_integrity_failure_blocks_full_gate(self):
+        for output in ("", '{"findings": []}'):
+            with self.subTest(output=output):
+                res = self.run_gate(f"import sys\nprint({output!r})\n"
+                                    "sys.stderr.write('integrity check crashed\\n')\nsys.exit(1)\n")
+                self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+                self.assertRegex(res.stdout, r"FAIL .*check_test_integrity\.py")
+                self.assertIn("integrity check crashed", res.stderr)
+                self.assertNotIn("Quality gate (full) passed.", res.stdout + res.stderr)
+
+    def test_successful_integrity_check_keeps_note_behavior(self):
+        for findings in ([], [{}]):
+            with self.subTest(findings=findings):
+                res = self.run_gate(f"print({json.dumps({'findings': findings})!r})\n")
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertIn("Quality gate (full) passed.", res.stdout)
+                self.assertEqual("NOTE  1 test-integrity signal(s)" in res.stdout, bool(findings))
+
+
 class IntegrityDetector(unittest.TestCase):
     def test_benign_config_and_type_annotations_are_not_weakening(self):
         with TempRepo() as r:

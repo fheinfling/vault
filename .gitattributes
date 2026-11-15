@@ -1,3 +1,5 @@
 # The code_quality/ folder is vendored review tooling, not part of the product.
 # Keep it out of GitHub's language statistics; the product is Swift.
 code_quality/** linguist-vendored
+# Fuzz seeds are data (one is deliberately invalid UTF-8): never diff or normalise them as text.
+Fuzz/Corpus/** binary
