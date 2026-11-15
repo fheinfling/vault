@@ -73,17 +73,13 @@ flowchart TD
 | 5 | **Repair**: implementer fixes the whole bug class, or answers with a code-backed reason the verifier re-checks | Implementer | Round cap 3, then escalate | `review_loop.sh`, `agents/fixer.md` |
 | 6 | **Classify risk**: deterministic path floors, then the model may *raise* the tier | Deterministic + classifier | none (sets approvals) | `classify_risk.py`, `quality.toml` |
 | 7 | **PR + CI**: same gates rerun with policy and scripts from the **base branch**; evidence packet posted (local review mode: the loop ran on a developer's machine and a human published its evidence to the PR; CI verifies it against the head commit) | CI | `checks` + `quality-gate` required | `ci/quality-gate.yml`, `scripts/evidence_comment.py` |
-| 8 | **Human approval** per tier, pinned to the head SHA; bots never count; review submitted/dismissed refreshes the PR run's gate | 0 / 1 / 2 humans | Missing approvals on *this* commit | `approval_gate.py`, `ci/quality-gate-refresh.yml` |
+| 8 | **Human approval** per tier, pinned to the head SHA; bots never count; review submitted/dismissed refreshes the PR run's gate | 0 / 1 / 2 humans | Missing approvals on *this* commit | `approval_gate.py`, `ci/quality-gate-review.yml` → `ci/quality-gate-refresh.yml` |
 | 9 | **Merge queue**: retest against latest main with the change applied | Deterministic | Any failure | GitHub merge queue (`merge_group`) |
 | 10 | **Release**: flag off by default → internal → canary → everyone; auto-rollback on SLO breach | Release controller | Health metrics | your flag system |
 | 11 | **Learn**: revert/incident becomes an eval case; repeated findings become lint rules | Agent drafts, human confirms once | Reviewer change kept only if evals don't drop | `evals/` |
 
 Pushes start `quality-gate.yml` via `pull_request`, and `merge_group` rechecks the
-queued change. Review submitted/dismissed events run `quality-gate-refresh.yml`,
-which uses only `gh` calls without checking out or executing repository code. It
-selects the newest `pull_request` run for the head SHA, polls every 15 seconds for
-up to 20 minutes until it completes, then re-runs its `quality-gate` job regardless
-of conclusion. Publishing evidence does the same, including when replacing evidence
+queued change. A review submitted or dismissed runs `quality-gate-review.yml`, a relay with no permissions (review events run the PR's copy of a workflow, read-only on fork PRs) that only names the PR and head commit in its run title. That completion triggers `quality-gate-refresh.yml` through `workflow_run`, which always runs the default branch's copy with `contents: read` and `actions: write`, fork PRs included, using only `gh` and `jq` with no checkout or repository code. It accepts the title only in the exact expected form and only for a PR whose live head is that commit, selects that PR's newest `pull_request` run for the head (two PRs can share a commit; fork runs are matched on head repository and branch), polls every 15 seconds for up to 20 minutes until it completes, then re-runs only its `quality-gate` job, whatever its verdict. It skips the re-run with a notice when the run was cancelled or the head moved meanwhile: re-running a stale run would cancel the new head's run through the shared concurrency group, and the new run reads the review itself. A re-run keeps the original event, so the gate job re-reads the PR's live base and stages the policy from it; if `[review].where` changed, it fails closed and asks for a full re-run. Publishing evidence does the same, including when replacing evidence
 behind a green gate. `publish --approve` delegates refresh to its review event.
 If no PR run exists, refresh reports a notice and exits successfully; that run will
 read the review/evidence when it runs. A timeout fails explicitly. The ruleset still

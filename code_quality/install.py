@@ -118,7 +118,7 @@ class Installer:
             self.create_if_missing(name, KIT / "rules" / name)
         for name in SUBAGENTS:
             self.overwrite(f".claude/agents/{name}", KIT / "agents" / name)
-        for name in ("quality-gate.yml", "quality-gate-refresh.yml"):
+        for name in ("quality-gate.yml", "quality-gate-review.yml", "quality-gate-refresh.yml"):
             self.overwrite(f".github/workflows/{name}", KIT / "ci" / name)
         self.create_if_missing(".github/PULL_REQUEST_TEMPLATE.md", KIT / "templates" / "PULL_REQUEST_TEMPLATE.md")
         if self.profile == "team":

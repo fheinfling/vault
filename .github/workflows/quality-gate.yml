@@ -25,9 +25,12 @@
 #           the PR, and the quality-gate job verifies it against the head commit. No secrets.
 # The `checks` job runs on [ci].runs_on after [ci].setup, both from the base policy.
 # PR events (including pushes) and merge_group start this workflow. Reviews submitted or
-# dismissed trigger quality-gate-refresh.yml, which waits for the newest PR run for the head
-# to complete and re-runs only its quality-gate job, whatever its conclusion. Local evidence
-# publish does the same; publish --approve delegates to the review event's refresh workflow.
+# dismissed run the permission-less relay quality-gate-review.yml, which triggers
+# quality-gate-refresh.yml (workflow_run, default branch, write token even for fork PRs). The
+# refresh waits for this PR's newest run for the head to complete and re-runs only its
+# quality-gate job, whatever its conclusion, unless the run was cancelled or the head moved.
+# Local evidence publish does the same; publish --approve delegates to the review event.
+# A re-run keeps the original event, so the gate job re-reads the PR's live base and its policy.
 # The ruleset still requires only `checks` and `quality-gate`.
 name: quality-gate
 
@@ -171,14 +174,51 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name != 'merge_group'
         with: { fetch-depth: 0, ref: "${{ github.event.pull_request.head.sha }}", persist-credentials: false }
+      # A refresh re-runs this job with the ORIGINAL event, whose base SHA may be stale: the base can
+      # have changed its policy (reviewers, approval counts) since. Judge against the live base.
+      - name: Live PR base
+        if: github.event_name != 'merge_group'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # The pulls API's base.sha is the base as of the PR's last update, not the branch's tip.
+          BASE_NAME=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.base.ref')
+          BASE_PATH=$(jq -rn --arg r "$BASE_NAME" '$r | split("/") | map(@uri) | join("/")')
+          LIVE_BASE=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$BASE_PATH" --jq '.object.sha')
+          if [[ ! "$LIVE_BASE" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=Unknown PR base::Could not read the base commit of PR #$PR."
+            exit 1
+          fi
+          if ! git cat-file -e "$LIVE_BASE^{commit}" 2>/dev/null; then
+            echo "::error title=Base commit not in the checkout::The PR's base is now $LIVE_BASE; re-run all jobs so the run starts from it."
+            exit 1
+          fi
+          if [ "$LIVE_BASE" != "$BASE_REF" ]; then
+            echo "::notice title=Base moved::This run started on base ${BASE_REF:0:10}; the gate judges against the live base ${LIVE_BASE:0:10}."
+          fi
+          echo "LIVE_BASE=$LIVE_BASE" >> "$GITHUB_ENV"
       - name: Trusted kit from base branch (a PR that installs or upgrades the gate stops here)
         if: github.event_name != 'merge_group'
+        env:
+          BASE_REF: ${{ env.LIVE_BASE }}
+          RUN_REVIEW_WHERE: ${{ needs.policy.outputs.review_where }}
         run: |
+          # Never stage from anything but a full commit SHA (an empty ref would read the PR's index).
+          [[ "$BASE_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "::error title=No live base::BASE_REF is not a commit SHA."; exit 1; }
           eval "$TRUSTED_KIT_FN"; trusted_kit
           # Checked in the staging step itself, before any staged script runs: on a bootstrap PR those
           # scripts are the PR's own, so nothing they report can be trusted, including "not bootstrap".
           if [ -f $RUNNER_TEMP/trusted/BOOTSTRAP ]; then
             echo "::error title=Installs or upgrades the quality gate::$(cat $RUNNER_TEMP/trusted/BOOTSTRAP). The gate cannot judge a change to itself: read the evidence and merge deliberately (admin bypass)."
+            exit 1
+          fi
+          # The earlier jobs of this run followed the policy at the run's original base. If the live
+          # base moved reviews elsewhere, their outputs no longer apply: fail closed.
+          live_where=$(python3 $RUNNER_TEMP/trusted/code_quality/scripts/ci_policy.py $RUNNER_TEMP/trusted/quality.toml | sed -n 's/^review_where=//p')
+          if [ "$live_where" != "$RUN_REVIEW_WHERE" ]; then
+            echo "::error title=Base policy changed::[review].where is '$live_where' on the live base but this run used '$RUN_REVIEW_WHERE'. Re-run all jobs (or push) so the whole run follows the current policy."
             exit 1
           fi
           cp $RUNNER_TEMP/trusted/quality.toml quality.toml
@@ -204,7 +244,9 @@ jobs:
             || [ $? -eq 3 ]   # 3 = no evidence yet: Enforce says "waiting for you"
       - name: Enforce
         if: github.event_name != 'merge_group'
-        env: { GH_TOKEN: "${{ github.token }}" }
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ env.LIVE_BASE }}   # tier floor and approvals from the live base's policy
         run: |
           set -euo pipefail
           status=0

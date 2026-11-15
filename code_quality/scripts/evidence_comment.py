@@ -8,7 +8,8 @@
       is the whole human step: an APPROVE review when you are not the PR author (a bot-opened
       PR), a `/director-approve` review when you are (GitHub won't let authors approve).
       Publication waits for the newest PR workflow run and re-runs its quality-gate job;
-      --approve delegates that refresh to quality-gate-refresh.yml via the review event.
+      --approve delegates that refresh to the review event (quality-gate-review.yml relays it to
+      quality-gate-refresh.yml).
 
   evidence_comment.py fetch --pr N --sha <head> [--repo owner/name] [--config quality.toml] [--out .quality]
       CI: finds the newest evidence comment for that head commit, posted by a human listed in
@@ -151,32 +152,48 @@ def publish(args: argparse.Namespace) -> None:
         print(f"{event} review submitted on {sha[:10]}")
         print("Skipping local gate refresh: the review event triggers quality-gate-refresh.yml.")
     else:
-        refresh_gate(repo, sha)
+        refresh_gate(repo, sha, pr)
 
 
-def select_gate_run(runs: list[dict], sha: str) -> dict | None:
-    """Newest pull_request run for sha from the workflow-runs API, regardless of status/verdict.
+def select_gate_run(runs: list[dict], sha: str, pr: dict) -> dict | None:
+    """Newest pull_request run of `pr` for sha from the workflow-runs API, regardless of status/verdict.
 
-    Callers list quality-gate.yml's runs. Creation time (then ID to break ties) determines
-    recency; an older run's later re-run must not displace the newest PR run.
+    Callers list quality-gate.yml's runs. A run belongs to the PR when its pull_requests list names
+    it, or (fork PRs, whose runs carry an empty list) when it ran on the PR's head repository and
+    branch. Two PRs can share a head commit; only this PR's run judges this PR's reviews.
+    Creation time (then ID to break ties) determines recency; an older run's later re-run must not
+    displace the newest PR run.
     """
-    return max((run for run in runs if run.get("event") == "pull_request" and run.get("head_sha") == sha),
+    number = pr["number"]
+    head_repo = ((pr.get("head") or {}).get("repo") or {}).get("full_name")
+    head_ref = (pr.get("head") or {}).get("ref")
+
+    def ours(run: dict) -> bool:
+        if any(p.get("number") == number for p in run.get("pull_requests") or []):
+            return True
+        return (not run.get("pull_requests") and head_repo is not None
+                and (run.get("head_repository") or {}).get("full_name") == head_repo
+                and run.get("head_branch") == head_ref)
+
+    return max((run for run in runs
+                if run.get("event") == "pull_request" and run.get("head_sha") == sha and ours(run)),
                key=lambda run: (run["created_at"], run["id"]), default=None)
 
 
-def refresh_gate(repo: str, sha: str) -> None:
+def refresh_gate(repo: str, sha: str, pr: dict) -> None:
     pages = json.loads(qlib.sh("gh", "api", "--paginate", "--slurp",
                               f"repos/{repo}/actions/workflows/quality-gate.yml/runs"
                               f"?event=pull_request&head_sha={sha}&per_page=100"))
-    run = select_gate_run([run for page in pages for run in page["workflow_runs"]], sha)
+    run = select_gate_run([run for page in pages for run in page["workflow_runs"]], sha, pr)
     if run is None:
-        print(f"::notice title=No PR gate run yet::No quality-gate.yml pull_request run exists for {sha}; "
-              "that run will read the evidence when it runs.")
+        print(f"::notice title=No PR gate run yet::No quality-gate.yml pull_request run of #{pr['number']} "
+              f"exists for {sha}; that run will read the evidence when it runs.")
         return
     run_id = str(run["id"])
     deadline = time.monotonic() + 20 * 60
     while time.monotonic() < deadline:
-        if gh(f"repos/{repo}/actions/runs/{run_id}")["status"] == "completed":
+        current = gh(f"repos/{repo}/actions/runs/{run_id}")
+        if current["status"] == "completed":
             break
         remaining = deadline - time.monotonic()
         if remaining > 0:
@@ -184,11 +201,22 @@ def refresh_gate(repo: str, sha: str) -> None:
     else:
         sys.exit(f"::error title=Gate refresh timed out::quality-gate.yml run {run_id} did not complete "
                  "within 20 minutes; unable to re-evaluate quality-gate.")
+    if current.get("conclusion") == "cancelled":
+        # Cancelled runs were superseded (a newer push shares the cancel-in-progress group); that run
+        # reads the evidence itself. Re-running this one would cancel the newer run in turn.
+        print(f"::notice title=Gate run superseded::quality-gate.yml run {run_id} was cancelled; not re-running it.")
+        return
     pages = json.loads(qlib.sh("gh", "api", "--paginate", "--slurp",
                               f"repos/{repo}/actions/runs/{run_id}/jobs?filter=latest&per_page=100"))
     job = next((job for page in pages for job in page["jobs"] if job["name"] == "quality-gate"), None)
     if job is None:
         sys.exit(f"evidence_comment: run {run_id} has no quality-gate job to re-run")
+    # Last call before the re-run, to keep the window for a racing push as small as possible.
+    live = gh(f"repos/{repo}/pulls/{pr['number']}")["head"]["sha"]
+    if live != sha:
+        print(f"::notice title=PR head moved::#{pr['number']} is now at {live[:10]}, not {sha[:10]}; "
+              "the new head's own run reads the evidence. Not re-running the stale run.")
+        return
     qlib.sh("gh", "run", "rerun", run_id, "--repo", repo, "--job", str(job["id"]))
     print(f"re-running quality-gate job {job['id']} of run {run_id}")
 

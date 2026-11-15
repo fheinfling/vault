@@ -1,45 +1,77 @@
-# Review events refresh the PR run's existing gate check. This workflow never checks out or
-# executes repository code; its write permission is used only to re-run the quality-gate job.
+# Review events refresh the PR run's existing gate check. Triggered by the quality-gate-review.yml
+# relay through workflow_run, so it always runs this default-branch copy with a write token, fork
+# PRs included. It never checks out or executes repository code; its write permission is used
+# only to re-run the quality-gate job. The relay's run title is untrusted (a PR can edit the relay):
+# it is accepted only in the exact expected shape, and only for a PR whose live head is that commit.
 name: quality-gate-refresh
 
 on:
-  pull_request_review:
-    types: [submitted, dismissed]
+  workflow_run:
+    workflows: [quality-gate-review]
+    types: [completed]
 
 permissions:
   contents: read
   actions: write
 
 concurrency:
-  group: quality-gate-refresh-${{ github.event.pull_request.number }}
+  # Keyed on the relay title (PR and head), so two PRs sharing a commit never cancel each other's
+  # refresh. The title is untrusted, but whichever run wins a group refreshes exactly the PR it names.
+  group: quality-gate-refresh-${{ github.event.workflow_run.display_title }}
   cancel-in-progress: true
 
 jobs:
   refresh:
+    if: github.event.workflow_run.event == 'pull_request_review'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      TITLE: ${{ github.event.workflow_run.display_title }}
     steps:
-      - name: Re-evaluate the newest PR run's gate
+      - name: Re-evaluate the PR run's gate
         shell: bash
         run: |
           set -euo pipefail
-          RUN=$(gh api --paginate --slurp \
-            "repos/$GH_REPO/actions/workflows/quality-gate.yml/runs?event=pull_request&head_sha=$HEAD_SHA&per_page=100" \
-            --jq '[.[].workflow_runs[] | select(.event == "pull_request")] | max_by([.created_at, .id]) | .id // empty')
+          title_re='^quality-gate review event for PR #([1-9][0-9]{0,8}) at ([0-9a-f]{40})$'
+          if [[ ! "$TITLE" =~ $title_re ]]; then
+            echo "::error title=Unrecognised relay run::The quality-gate-review run title is not in the expected form; nothing re-run."
+            exit 1
+          fi
+          PR="${BASH_REMATCH[1]}"
+          HEAD_SHA="${BASH_REMATCH[2]}"
+          live_head() { gh api "repos/$GH_REPO/pulls/$PR" --jq '.head.sha'; }
+
+          PR_JSON=$(gh api "repos/$GH_REPO/pulls/$PR")
+          if [ "$(jq -r '.head.sha' <<<"$PR_JSON")" != "$HEAD_SHA" ]; then
+            echo "::notice title=PR head moved::PR #$PR is no longer at $HEAD_SHA; the new head's own run reads the review."
+            exit 0
+          fi
+          HEAD_REPO=$(jq -r '.head.repo.full_name // ""' <<<"$PR_JSON")
+          HEAD_REF=$(jq -r '.head.ref // ""' <<<"$PR_JSON")
+
+          # This PR's newest pull_request run for the head. Two PRs can share a head commit, so a run
+          # counts only when it names this PR, or (fork PRs list none) ran on this PR's head branch.
+          # One page is plenty for one commit. jq runs separately: the runner's gh rejects slurping with its jq flag.
+          RUN=$(gh api "repos/$GH_REPO/actions/workflows/quality-gate.yml/runs?event=pull_request&head_sha=$HEAD_SHA&per_page=100" \
+            | jq -r --argjson pr "$PR" --arg repo "$HEAD_REPO" --arg ref "$HEAD_REF" '
+                [.workflow_runs[]
+                 | select(.event == "pull_request")
+                 | select(((.pull_requests // []) | any(.number == $pr))
+                          or (((.pull_requests // []) | length) == 0 and $repo != ""
+                              and .head_repository.full_name == $repo and .head_branch == $ref))]
+                | max_by([.created_at, .id]) | .id // empty')
           if [ -z "$RUN" ]; then
-            echo "::notice title=No PR gate run yet::No quality-gate.yml pull_request run exists for $HEAD_SHA; that run will read the review when it runs."
+            echo "::notice title=No PR gate run yet::No quality-gate.yml pull_request run of PR #$PR exists for $HEAD_SHA; that run will read the review when it runs."
             exit 0
           fi
 
           deadline=$((SECONDS + 1200))
-          status=""
+          state=""
           while (( SECONDS < deadline )); do
-            status=$(gh api "repos/$GH_REPO/actions/runs/$RUN" --jq '.status')
-            if [ "$status" = "completed" ]; then
+            state=$(gh api "repos/$GH_REPO/actions/runs/$RUN" --jq '"\(.status) \(.conclusion // "")"')
+            if [ "${state%% *}" = "completed" ]; then
               break
             fi
             remaining=$((deadline - SECONDS))
@@ -47,17 +79,27 @@ jobs:
               sleep "$((remaining < 15 ? remaining : 15))"
             fi
           done
-          if [ "$status" != "completed" ]; then
+          if [ "${state%% *}" != "completed" ]; then
             echo "::error title=Gate refresh timed out::quality-gate.yml run $RUN did not complete within 20 minutes; unable to re-evaluate quality-gate."
             exit 1
           fi
-
-          JOB=$(gh api --paginate --slurp \
+          # A cancelled run was superseded by a newer push (shared cancel-in-progress group); re-running
+          # it, or any run whose commit is no longer the head, would cancel the new head's run in turn.
+          if [ "$state" = "completed cancelled" ]; then
+            echo "::notice title=Gate run superseded::quality-gate.yml run $RUN was cancelled; not re-running it."
+            exit 0
+          fi
+          JOB=$(gh api \
             "repos/$GH_REPO/actions/runs/$RUN/jobs?filter=latest&per_page=100" \
-            --jq '[.[].jobs[] | select(.name == "quality-gate")] | max_by(.id) | .id // empty')
+            --jq '[.jobs[] | select(.name == "quality-gate")] | max_by(.id) | .id // empty')
           if [ -z "$JOB" ]; then
             echo "::error title=Missing gate job::quality-gate.yml run $RUN has no quality-gate job to re-run."
             exit 1
+          fi
+          # Last call before the re-run, to keep the window for a racing push as small as possible.
+          if [ "$(live_head)" != "$HEAD_SHA" ]; then
+            echo "::notice title=PR head moved::PR #$PR moved past $HEAD_SHA while waiting; the new head's own run reads the review."
+            exit 0
           fi
           gh run rerun "$RUN" --repo "$GH_REPO" --job "$JOB"
           echo "Re-running quality-gate job $JOB of run $RUN."
