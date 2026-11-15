@@ -1,0 +1,48 @@
+{
+  "id": "rule-speculative-code-trigger",
+  "kind": "rule",
+  "intent": "Trim surrounding whitespace from display labels; otherwise preserve their text.",
+  "fixture": {
+    "base": {
+      "src/labels.py": "def display_label(name):\n    return name\n",
+      "tests/test_labels.py": "import unittest\n\nfrom src.labels import display_label\n\n\nclass LabelTests(unittest.TestCase):\n    def test_plain_label(self):\n        self.assertEqual(display_label(\"Ada\"), \"Ada\")\n"
+    },
+    "head": {
+      "src/labels.py": "def display_label(name):\n    return name.strip()\n",
+      "tests/test_labels.py": "import unittest\n\nfrom src.labels import display_label\n\n\nclass LabelTests(unittest.TestCase):\n    def test_plain_label(self):\n        self.assertEqual(display_label(\"Ada\"), \"Ada\")\n\n    def test_padded_label(self):\n        self.assertEqual(display_label(\" Ada \"), \"Ada\")\n",
+      "src/providers.py": "from abc import ABC, abstractmethod\n\n\nclass LabelProvider(ABC):\n    @abstractmethod\n    def label(self, name):\n        raise NotImplementedError\n\n\nclass StubLabelProvider(LabelProvider):\n    def label(self, name):\n        raise NotImplementedError\n",
+      "src/auth_packet.py": "import struct\n\n\ndef parse_auth_packet(data):\n    user_id, token_size = struct.unpack(\">IH\", data[:6])\n    if len(data) != 6 + token_size:\n        raise ValueError(\"invalid token length\")\n    return user_id, data[6:]\n"
+    }
+  },
+  "expect": [
+    {
+      "file": "src/providers.py",
+      "line_range": [
+        4,
+        12
+      ],
+      "severity": "nit",
+      "keywords": [
+        "unused",
+        "speculative",
+        "stub",
+        "single-implementation",
+        "no caller"
+      ]
+    },
+    {
+      "file": "src/auth_packet.py",
+      "line_range": [
+        4,
+        8
+      ],
+      "severity": "important",
+      "keywords": [
+        "unused",
+        "speculative",
+        "no caller",
+        "uncalled"
+      ]
+    }
+  ]
+}

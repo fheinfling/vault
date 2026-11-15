@@ -1,0 +1,16 @@
+{
+  "id": "rule-speculative-code-unrelated",
+  "kind": "clean",
+  "intent": "Trim surrounding whitespace from display labels; otherwise preserve their text.",
+  "fixture": {
+    "base": {
+      "src/labels.py": "def display_label(name):\n    return name\n",
+      "tests/test_labels.py": "import unittest\n\nfrom src.labels import display_label\n\n\nclass LabelTests(unittest.TestCase):\n    def test_plain_label(self):\n        self.assertEqual(display_label(\"Ada\"), \"Ada\")\n"
+    },
+    "head": {
+      "src/labels.py": "def display_label(name):\n    return name.strip()\n",
+      "tests/test_labels.py": "import unittest\n\nfrom src.labels import display_label\n\n\nclass LabelTests(unittest.TestCase):\n    def test_plain_label(self):\n        self.assertEqual(display_label(\"Ada\"), \"Ada\")\n\n    def test_padded_label(self):\n        self.assertEqual(display_label(\" Ada \"), \"Ada\")\n"
+    }
+  },
+  "expect": []
+}

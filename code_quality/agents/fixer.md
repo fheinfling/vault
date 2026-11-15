@@ -18,7 +18,7 @@ refute them. Address every one:
   your response entry. If it fails, fix the bug.
 
 Constraints:
-- Keep the repair minimal. No unrelated refactors or cleanups in a repair round.
+- Keep repairs minimal: no speculative code or unrelated refactors/cleanups; prefer deleting to adding.
 - Never weaken a check to make it pass (delete/skip tests, loosen assertions,
   add suppressions, lower thresholds, regenerate snapshots blindly).
 - Run the full quality gate (`code_quality/scripts/quality_gate.sh full`) and

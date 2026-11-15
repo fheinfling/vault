@@ -16,6 +16,12 @@ tells you what a step does and `next <step> <result>` where to go after it.
   patterns; reuse the helpers that already exist.
 
 ## While you write code
+- Build the simplest thing that meets the acceptance criteria (KISS/YAGNI).
+- No code for work outside this PR: no stubs or placeholder modules, no
+  single-implementation interfaces unless a test or platform boundary needs
+  the seam, and no options or parameters nobody passes.
+- Delete code with no caller instead of keeping it "for later"; prefer deleting
+  to adding.
 - One coherent change per PR. If it grows past ~400 changed lines (excluding
   generated files and tests), split it unless it is purely mechanical.
 - Every behavior change gets a test that fails without the change. For a bug

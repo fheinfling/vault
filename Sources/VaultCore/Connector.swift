@@ -28,7 +28,6 @@ public enum ConnectorError: Error, Sendable, CustomStringConvertible {
     case decoding(String)
     /// A secret is missing from the secret store.
     case missingSecret(String)
-    case notImplemented(String)
 
     public var description: String {
         switch self {
@@ -36,7 +35,6 @@ public enum ConnectorError: Error, Sendable, CustomStringConvertible {
         case .unavailable(let m): return "unavailable: \(m)"
         case .decoding(let m): return "decoding: \(m)"
         case .missingSecret(let m): return "missing secret: \(m)"
-        case .notImplemented(let m): return "not implemented: \(m)"
         }
     }
 }
@@ -61,19 +59,6 @@ public extension SecretStore {
     func setString(_ key: String, _ value: String) throws {
         try set(key, Data(value.utf8))
     }
-}
-
-public protocol Signer: Sendable {
-    func hmacSHA256(key: Data, message: Data) -> Data
-    func hmacSHA512(key: Data, message: Data) -> Data
-    func sha256(_ data: Data) -> Data
-    /// RSASSA-PKCS1-v1_5 with SHA-256, as required for Enable Banking's JWTs.
-    func rs256Sign(privateKeyPEM: Data, message: Data) throws -> Data
-}
-
-public protocol AuthSession: Sendable {
-    /// Opens `url` for the user and returns the callback URL the provider redirects to.
-    func authorize(url: URL, callbackScheme: String) async throws -> URL
 }
 
 public protocol Scheduler: Sendable {

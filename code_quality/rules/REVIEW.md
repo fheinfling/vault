@@ -19,6 +19,9 @@ review outcome; delete any rule that doesn't.
 Reserve **Important** for findings that would break behavior, leak data,
 corrupt state, or block a rollback, plus any violation of a rule in AGENTS.md /
 CLAUDE.md / this file. Style, naming, and refactoring ideas are Nit at most.
+For speculative code, security-sensitive surface added with no caller (crypto,
+parsing untrusted input, auth, network) is **Important**; other needless
+complexity is **Nit**, even when it violates the simplicity rules.
 Mark bugs the PR did not introduce as **Pre-existing**, unless the PR newly
 exposes or worsens them.
 
@@ -40,6 +43,10 @@ Report at most three Nits per review.
 - Requests to add abstraction, comments, or tests for cases that can't happen.
 
 ## Always check
+- flag code this PR adds that nothing in the PR or existing code calls or
+  needs: stubs, placeholders, single-implementation abstractions without a
+  required test/platform seam, unused parameters/options/config; safe path:
+  the acceptance criteria use it, or a test or platform boundary needs the seam.
 - New or changed API routes have an integration test and validate input.
 - Queries are scoped to the caller's tenant/user.
 - New behavior is behind a flag (default off) and the PR says how to revert.

@@ -38,7 +38,7 @@ jobs:
         run: ./scripts/check-no-dependencies.sh
 
   # The core must stay Foundation-only. On Linux, Package.swift omits the Apple targets,
-  # so this job fails the moment VaultCore, FinTSKit or a connector imports an Apple framework.
+  # so this job fails the moment VaultCore or a future connector imports an Apple framework.
   linux-core:
     runs-on: ubuntu-latest
     container: swift:6.1
