@@ -158,8 +158,8 @@ struct VaultCLI {
         fputs("vault: warning: \(reason)\n", stderr)
     }
 
-    /// Which connectors exist for this installation. Secrets are looked up by each connector at run time;
-    /// a connector with no secret reports `missingSecret` rather than failing to construct.
+    /// The connectors built so far: none yet. Each connector's PR adds it here; `sync` then runs it
+    /// through the egress check, the ledger and `SyncEngine`, which exist and are tested today.
     static func configuredConnectors() -> [any Connector] {
         []
     }
